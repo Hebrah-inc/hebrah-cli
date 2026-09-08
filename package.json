@@ -40,7 +40,8 @@
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "lint": "eslint . --ext .ts",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "prepublishOnly": "pnpm build && pnpm test --run || true"
   },
   "dependencies": {
     "@hebrah/sdk": "^0.8.2"
@@ -52,5 +53,17 @@
     "tsx": "^4",
     "typescript": "^5.6",
     "vitest": "^2"
-  }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "bugs": "https://github.com/Hebrah-inc/hebrah-cli/issues",
+  "author": "Hebrah, Inc.",
+  "contributors": [
+    {
+      "name": "Hebrah",
+      "email": "hello@hebrah.com"
+    }
+  ]
 }

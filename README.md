@@ -13,7 +13,7 @@ npm install -g @hebrah/cli
 hebrah signup        # 90 seconds, $1 trial credit, no card
 ```
 
-> Companion to [documentation/hebrah-strategy-2026-09-cli.md](../documentation/hebrah-strategy-2026-09-cli.md).
+> Companion to the [Wave 1 strategy doc](https://github.com/Hebrah-inc/hebrah-strategy-docs/blob/main/documentation/hebrah-strategy-2026-09-cli.md) in the `hebrah-strategy-docs` repo.
 
 ## Commands
 
@@ -79,10 +79,10 @@ pnpm test
 
 ## Related
 
-- [documentation/hebrah-strategy-2026-09-cli.md](../documentation/hebrah-strategy-2026-09-cli.md) — full CLI spec
-- [hebrah.com/SKILL.md](https://hebrah.com/SKILL.md) — public SKILL.md
-- [documentation/hebrah-strategy-2026-09.md](../documentation/hebrah-strategy-2026-09.md) — strategy overview
-- [documentation/hebrah-strategy-2026-09-skill.md](../documentation/hebrah-strategy-2026-09-skill.md) — SKILL.md content draft
+- [hebrah.com/SKILL.md](https://hebrah.com/SKILL.md) — public SKILL.md (Wave 1 onboarding doc)
+- [hebrah.com](https://hebrah.com) — marketing site
+- [@hebrah/sdk](https://www.npmjs.com/package/@hebrah/sdk) — official Node.js SDK
+- [github.com/Hebrah-inc](https://github.com/Hebrah-inc) — org with strategy docs and demos
 
 ## License
 
