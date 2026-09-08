@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// Hebrah CLI entry point.
+// Loads dist/index.js (built by `pnpm build`) for the published package.
+// For dev, run `pnpm dev` (tsx watch src/index.ts) or `node --experimental-loader=tsx bin/hebrah`.
+
+import('../dist/index.js').catch((err) => {
+  console.error('hebrah: failed to load CLI');
+  console.error(err.message);
+  process.exit(4);
+});

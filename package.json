@@ -1,0 +1,56 @@
+{
+  "name": "@hebrah/cli",
+  "version": "0.1.0",
+  "description": "Hebrah \u2014 the data layer for AI agents. Terminal-native CLI.",
+  "bin": {
+    "hebrah": "./bin/hebrah"
+  },
+  "main": "./dist/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "mcp",
+    "data",
+    "scoped-access",
+    "audit",
+    "hebrah",
+    "postgresql",
+    "fhir",
+    "sftp",
+    "sqlite",
+    "http-rest"
+  ],
+  "homepage": "https://hebrah.com/cli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hebrah-inc/hebrah-cli.git"
+  },
+  "license": "MIT",
+  "files": [
+    "bin/",
+    "dist/",
+    "skill.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@hebrah/sdk": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "eslint": "^9",
+    "prettier": "^3",
+    "tsx": "^4",
+    "typescript": "^5.6",
+    "vitest": "^2"
+  }
+}
