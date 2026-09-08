@@ -12,10 +12,11 @@ import { success, error, info } from '../output/format.js';
 
 export default async function login(
   _args: string[],
-  _options: Record<string, unknown>
+  options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = parseArgs({
-    args: _args,
+    args: argv,
     options: {
       key: { type: 'string' },
       env: { type: 'boolean', default: false }

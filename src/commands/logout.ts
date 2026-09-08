@@ -7,8 +7,9 @@ export default async function logout(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = (await import('node:util')).parseArgs({
-    args: _args,
+    args: argv,
     options: {
       'revoke-all': { type: 'boolean', default: false }
     },

@@ -16,8 +16,9 @@ export default async function packs(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = (await import('node:util')).parseArgs({
-    args: _args,
+    args: argv,
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -27,7 +28,7 @@ export default async function packs(
   try {
     const packs = await api.get<Pack[]>('/v1/connections/packs');
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(packs);
       return 0;
     }

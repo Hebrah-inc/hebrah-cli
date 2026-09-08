@@ -21,15 +21,17 @@ export default async function inspect(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const target = args[0];
+  const argv = (options._argv as string[] | undefined) ?? args;
+  const target = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!target) {
     console.error('hebrah inspect: target required');
     console.error('Usage: hebrah inspect <target>');
     return 1;
   }
 
+  const flagOnly = argv.filter((a) => a !== target);
   const { values } = (await import('node:util')).parseArgs({
-    args: args.slice(1),
+    args: flagOnly,
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -41,7 +43,7 @@ export default async function inspect(
       `/v1/connections/targets/${encodeURIComponent(target)}`
     );
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(detail);
       return 0;
     }

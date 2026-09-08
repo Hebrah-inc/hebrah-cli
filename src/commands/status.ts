@@ -21,14 +21,16 @@ export default async function status(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const connId = args[0];
+  const argv = (options._argv as string[] | undefined) ?? args;
+  const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!connId) {
     console.error('hebrah status: connection_id required');
     return 1;
   }
 
+  const flagOnly = argv.filter((a) => a !== connId);
   const { values } = (await import('node:util')).parseArgs({
-    args: args.slice(1),
+    args: flagOnly,
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -38,7 +40,7 @@ export default async function status(
   try {
     const detail = await api.get<ConnectionDetail>(`/v1/connections/${connId}`);
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(detail);
       return 0;
     }

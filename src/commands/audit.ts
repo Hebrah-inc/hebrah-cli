@@ -32,14 +32,17 @@ export default async function audit(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const subcommand = args[0];
-  const connId = args[1] ?? args[0];
+  const argv = (options._argv as string[] | undefined) ?? args;
+  // First non-flag token is subcommand (verify|export|help) or connId
+  const tokens = argv.filter((a) => !a.startsWith('-'));
+  const subcommand = tokens[0];
+  const connId = tokens[1] ?? tokens[0];
 
   if (subcommand === 'verify') {
-    return auditVerify(connId, args[1] ? args[1] : args[0], options);
+    return auditVerify(connId, options);
   }
   if (subcommand === 'export') {
-    return auditExport(connId, args[1] ? args[1] : args[0], options);
+    return auditExport(connId, options);
   }
   if (subcommand === 'help' || !subcommand) {
     console.log('Usage:');
@@ -54,8 +57,9 @@ export default async function audit(
 }
 
 async function auditShow(connId: string, options: Record<string, unknown>): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? [];
   const { values } = parseArgs({
-    args: [],
+    args: argv,
     options: {
       limit: { type: 'string', default: '50' },
       since: { type: 'string' },
@@ -74,7 +78,7 @@ async function auditShow(connId: string, options: Record<string, unknown>): Prom
   try {
     const events = await api.get<AuditEvent[]>(`/v1/connections/${connId}/audit`, params);
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(events);
       return 0;
     }
@@ -100,7 +104,7 @@ async function auditShow(connId: string, options: Record<string, unknown>): Prom
   }
 }
 
-async function auditVerify(connId: string, _actualConnId: string | undefined, _options: Record<string, unknown>): Promise<number> {
+async function auditVerify(connId: string, _options: Record<string, unknown>): Promise<number> {
   try {
     const result = await api.get<VerifyResponse>(`/v1/audit/verify?connection_id=${connId}`);
 
@@ -119,7 +123,7 @@ async function auditVerify(connId: string, _actualConnId: string | undefined, _o
   }
 }
 
-async function auditExport(connId: string, _actualConnId: string | undefined, _options: Record<string, unknown>): Promise<number> {
+async function auditExport(connId: string, _options: Record<string, unknown>): Promise<number> {
   try {
     const events = await api.get<AuditEvent[]>(`/v1/connections/${connId}/audit?limit=10000`);
 

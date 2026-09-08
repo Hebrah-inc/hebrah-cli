@@ -24,15 +24,19 @@ export default async function query(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const connId = args[0];
+  const argv = (options._argv as string[] | undefined) ?? args;
+  const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!connId) {
     console.error('hebrah query: connection_id required');
     console.error('Usage: hebrah query <connection_id> --sql "SELECT ..."');
     return 1;
   }
 
+  // Re-parse the argv with the positional removed so parseArgs (with
+  // allowPositionals: false) doesn't reject it.
+  const flagOnly = argv.filter((a) => a !== connId);
   const { values } = parseArgs({
-    args: args.slice(1),
+    args: flagOnly,
     options: {
       sql: { type: 'string' },
       file: { type: 'string' },
@@ -59,7 +63,7 @@ export default async function query(
       maxRows
     });
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(result);
       return 0;
     }

@@ -28,8 +28,9 @@ export default async function whoami(
     return 2;
   }
 
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = (await import('node:util')).parseArgs({
-    args: _args,
+    args: argv,
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -39,7 +40,7 @@ export default async function whoami(
   try {
     const usage = await api.get<UsageResponse>('/v1/agent/account/usage');
 
-    if (options.json || values.json) {
+    if (values.json) {
       console.log(JSON.stringify({ ...creds, usage }, null, 2));
       return 0;
     }

@@ -45,12 +45,15 @@ interface CommandDescriptor {
 }
 
 async function main(): Promise<number> {
-  const { values, positionals } = parseArgs({
+  // Only consume truly global flags at the top level. Per-command flags
+  // (--json, --sql, --scopes, etc.) must NOT be consumed here, because
+  // the top-level parser would treat unknown flags as booleans and silently
+  // drop their string values. Each command re-parses its own argv slice.
+  const { positionals } = parseArgs({
     args: process.argv.slice(2),
     allowPositionals: true,
-    strict: false,  // forward per-command flags (--path, --refresh, etc.)
+    strict: false,
     options: {
-      json: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
       version: { type: 'boolean', short: 'v', default: false },
       debug: { type: 'boolean', default: false }
@@ -58,13 +61,14 @@ async function main(): Promise<number> {
   });
 
   const cmd = positionals[0] ?? 'help';
+  const debug = process.argv.includes('--debug');
 
-  if (values.version) {
+  if (process.argv.includes('-v') || process.argv.includes('--version')) {
     console.log(`hebrah ${PACKAGE_VERSION}`);
     return 0;
   }
 
-  if (cmd === 'help' || values.help) {
+  if (cmd === 'help' || process.argv.includes('-h') || process.argv.includes('--help')) {
     showHelp();
     return 0;
   }
@@ -79,9 +83,14 @@ async function main(): Promise<number> {
   try {
     const result = await descriptor.handler();
     if (result === undefined) return 0;  // void-returning built-in (version, help)
-    return await result.default(positionals.slice(1), { ...values, _command: cmd });
+    // Pass positionals.slice(1) as positional args AND the original argv
+    // slice (after the command name) so per-command parseArgs sees all
+    // flags intact. The top-level parser with strict:false drops unknown
+    // flag values, so we must hand the command the raw argv.
+    const cmdArgv = process.argv.slice(2 + 1); // skip 'node', 'bin/hebrah'
+    return await result.default(positionals.slice(1), { _command: cmd, debug, _argv: cmdArgv });
   } catch (err: any) {
-    if (values.debug) {
+    if (debug) {
       console.error(err.stack);
     } else {
       console.error(`hebrah: ${err.message ?? 'unknown error'}`);

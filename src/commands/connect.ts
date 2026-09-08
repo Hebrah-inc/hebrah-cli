@@ -6,6 +6,7 @@
 import { parseArgs } from 'node:util';
 import { api } from '../api/client.js';
 import { json, success, info, error, kv } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface ConnectionResponse {
   connectionId: string;
@@ -21,15 +22,17 @@ export default async function connect(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const target = args[0];
+  const argv = getArgv(options, args);
+  const target = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!target) {
     error('hebrah connect: target required');
-    error('Usage: hebrah connect <target> --scopes <scope1,scope2,...> [--ttl 3600]');
+    error('Usage: hebrah connect <target> --scopes <scope1,scope2,...> [--ttl 3600] [--tier container|vm]');
     return 1;
   }
 
+  const flagOnly = argv.filter((a) => a !== target);
   const { values } = parseArgs({
-    args: args.slice(1),
+    args: flagOnly,
     options: {
       scopes: { type: 'string' },
       ttl: { type: 'string', default: '3600' },
@@ -53,7 +56,7 @@ export default async function connect(
       tier: values.tier
     });
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(result);
       return 0;
     }

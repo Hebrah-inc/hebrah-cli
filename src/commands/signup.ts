@@ -27,8 +27,9 @@ export default async function signup(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = parseArgs({
-    args: _args,
+    args: argv,
     options: {
       name: { type: 'string' },
       email: { type: 'string' },
@@ -86,7 +87,7 @@ export default async function signup(
       trial: result.trial
     });
 
-    if (options.json) {
+    if (values.json) {
       json(result);
     } else {
       success(`Account created: ${bold(result.orgName)} (${result.orgId})`);

@@ -18,8 +18,9 @@ export default async function usage(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = parseArgs({
-    args: _args,
+    args: argv,
     options: {
       period: { type: 'string', default: 'month' },
       json: { type: 'boolean', default: false }
@@ -32,7 +33,7 @@ export default async function usage(
       period: values.period as string
     });
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(usage);
       return 0;
     }

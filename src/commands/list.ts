@@ -18,8 +18,9 @@ export default async function list(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = parseArgs({
-    args: _args,
+    args: argv,
     options: {
       all: { type: 'boolean', default: false },
       target: { type: 'string' },
@@ -35,7 +36,7 @@ export default async function list(
   try {
     const conns = await api.get<Connection[]>('/v1/connections', params);
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(conns);
       return 0;
     }

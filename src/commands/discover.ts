@@ -27,8 +27,9 @@ export default async function discover(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
+  const argv = (options._argv as string[] | undefined) ?? _args;
   const { values } = parseArgs({
-    args: _args,
+    args: argv,
     options: {
       pack: { type: 'string', multiple: true },
       healthy: { type: 'boolean', default: false },
@@ -47,7 +48,7 @@ export default async function discover(
   try {
     const targets = await api.get<Target[]>('/v1/connections/targets', params);
 
-    if (options.json || values.json) {
+    if (values.json) {
       json(targets);
       return 0;
     }

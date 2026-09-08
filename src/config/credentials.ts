@@ -3,7 +3,7 @@
 // Wave 1 stores the hb_conn_* API key + org metadata. Future waves add
 // SSO tokens, relay enrollment tokens, and wallet balance.
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { chmodSync } from 'node:fs';
@@ -42,8 +42,7 @@ export function saveCredentials(creds: Credentials): void {
 
 export function clearCredentials(): void {
   if (existsSync(CREDENTIALS_PATH)) {
-    const fs = require('node:fs') as typeof import('node:fs');
-    fs.unlinkSync(CREDENTIALS_PATH);
+    unlinkSync(CREDENTIALS_PATH);
   }
 }
 
