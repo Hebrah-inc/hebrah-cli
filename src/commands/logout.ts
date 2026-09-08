@@ -1,7 +1,17 @@
 // `hebrah logout` — remove local credentials.
+//
+// Usage:
+//   hebrah logout                          (remove local credentials only)
+//   hebrah logout --revoke-all             (also revoke all server-side connections)
+//
+// Note: `hebrah logout` only removes `~/.hebrah/credentials`. If
+// `HEBRAH_API_KEY` is set in the environment, subsequent commands will
+// still authenticate via that env var (process-bound). Unset it with
+// `unset HEBRAH_API_KEY` (POSIX) or `Remove-Item Env:HEBRAH_API_KEY`
+// (PowerShell) to fully log out.
 
 import { clearCredentials } from '../config/credentials.js';
-import { success, info } from '../output/format.js';
+import { success, info, warn } from '../output/format.js';
 
 export default async function logout(
   _args: string[],
@@ -18,6 +28,12 @@ export default async function logout(
 
   clearCredentials();
   success('Logged out. Local credentials removed.');
+
+  if (process.env.HEBRAH_API_KEY) {
+    warn('HEBRAH_API_KEY env var is still set. Unset it to fully log out:');
+    info('  POSIX:     unset HEBRAH_API_KEY');
+    info('  PowerShell: Remove-Item Env:HEBRAH_API_KEY');
+  }
 
   if (values['revoke-all']) {
     info('(revoke-all not yet implemented — use `hebrah revoke --all`)');

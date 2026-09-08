@@ -17,7 +17,14 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 const DEFAULT_API_URL = process.env.HEBRAH_API_URL ?? 'https://api.hebrah.com';
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.HEBRAH_API_TIMEOUT_MS ?? '30000', 10);
+
+function parseTimeoutMs(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_TIMEOUT_MS = parseTimeoutMs(process.env.HEBRAH_API_TIMEOUT_MS, 30000);
 
 interface RequestOptions {
   /** Per-call timeout override in milliseconds. */
