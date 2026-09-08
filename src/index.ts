@@ -31,6 +31,7 @@ const COMMANDS: Record<string, CommandDescriptor> = {
   revoke: { description: 'Close a connection', handler: () => import('./commands/revoke.js') },
   query: { description: 'Execute query through connection', handler: () => import('./commands/query.js') },
   audit: { description: 'Show / verify / export audit events', handler: () => import('./commands/audit.js') },
+  topup: { description: 'Add credit via Stripe Checkout', handler: () => import('./commands/topup.js') },
   skill: { description: 'Show the SKILL.md', handler: async () => (await import('./commands/skill.js')) as { default: (args: string[], options: Record<string, unknown>) => Promise<number> } },
   version: { description: 'Show version', handler: async () => { console.log(`hebrah ${PACKAGE_VERSION}`); } },
   help: { description: 'Show help', handler: async () => { showHelp(); } }
@@ -134,6 +135,9 @@ Commands:
     audit <conn>        Show audit events
     audit verify <conn> Verify hash chain
     audit export <conn> Export hash-chained audit log
+
+  Billing:
+    topup               Add credit via Stripe Checkout
 
   Help:
     skill               Show the SKILL.md

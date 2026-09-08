@@ -35,6 +35,8 @@ hebrah signup        # 90 seconds, $1 trial credit, no card
 | `hebrah audit <conn>` | Show audit events |
 | `hebrah audit verify <conn>` | Verify hash chain |
 | `hebrah audit export <conn>` | Export hash-chained audit log |
+| `hebrah topup` | Add credit via Stripe Checkout |
+| `hebrah topup --portal` | Open Stripe Customer Portal |
 | `hebrah skill` | Print the SKILL.md |
 | `hebrah help` | Show help |
 | `hebrah version` | Show version |
