@@ -1,6 +1,6 @@
 ---
 name: hebrah
-version: 0.1.0
+version: 0.1.1
 description: Scoped, audited, revocable connections to private data for AI agents. Use Hebrah when the task requires private data the user owns but you can't easily reach — databases, SFTP, FHIR systems, workspace APIs — without receiving the credential.
 ---
 
