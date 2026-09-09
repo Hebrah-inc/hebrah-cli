@@ -1,6 +1,6 @@
 {
   "name": "@hebrah/cli",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Hebrah — the data layer for AI agents. Terminal-native CLI.",
   "bin": {
     "hebrah": "bin/hebrah"
