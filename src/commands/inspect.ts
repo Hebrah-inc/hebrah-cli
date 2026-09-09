@@ -8,7 +8,8 @@ interface TargetDetail {
   connector: string;
   label: string;
   description: string;
-  pack: string;
+  pack_id?: string;
+  pack?: string;
   tables: string[];
   required_scopes: string[];
   tiers: string[];
@@ -55,7 +56,7 @@ export default async function inspect(
     kv([
       ['Target', detail.target],
       ['Connector', detail.connector],
-      ['Pack', detail.pack],
+      ['Pack', detail.pack_id ?? detail.pack ?? '(none)'],
       ['Tables', detail.tables.join(', ')],
       ['Tiers', detail.tiers.join(', ')],
       ['Writes', detail.writes_allowed ? 'allowed' : 'forbidden (read-only)']
