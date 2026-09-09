@@ -14,7 +14,7 @@
 //   - Trial: $1 free credit, 100 queries, 1 GB egress, 7-day TTL
 //
 // Implementation notes:
-//   - Calls `POST /v1/billing/checkout-session` to mint a Stripe Checkout URL.
+//   - Calls `POST /v1/agent/topup` to mint a Stripe Checkout URL.
 //   - Opens URL via `open` (macOS), `xdg-open` (Linux), or `cmd.exe /c start` (Windows).
 //   - Falls back to printing the URL if no browser handler is available.
 //   - The actual credit application happens via Stripe webhook → backend,
@@ -29,11 +29,10 @@ import { loadCredentials } from '../config/credentials.js';
 import { json, success, info, warn, error, bold, dim } from '../output/format.js';
 
 interface CheckoutSessionResponse {
-  checkoutUrl: string;
-  sessionId: string;
-  amountCents: number;
-  currency: string;
-  expiresAt: string;
+  url: string;
+  session_id: string;
+  amount_cents: number;
+  mode: string;
 }
 
 interface PortalSessionResponse {
@@ -65,7 +64,6 @@ export default async function topup(
     options: {
       amount: { type: 'string' },
       credits: { type: 'string' },
-      portal: { type: 'boolean', default: false },
       print: { type: 'boolean', default: false },
       yes: { type: 'boolean', short: 'y', default: false },
       json: { type: 'boolean', default: false }
@@ -73,10 +71,8 @@ export default async function topup(
     allowPositionals: false
   });
 
-  // Customer Portal path — manage subscription, invoices, payment methods
-  if (values.portal) {
-    return openPortal(values.print === true, options);
-  }
+  // Note: --portal flag removed (backend has no /v1/billing/portal yet).
+  // Use `hebrah status` + manual Stripe dashboard for subscription mgmt.
 
   // Validate amount
   const amountUsd = values.amount !== undefined ? parseFloat(values.amount as string) : NaN;
@@ -132,10 +128,8 @@ export default async function topup(
   }
 
   try {
-    const session = await api.post<CheckoutSessionResponse>('/v1/billing/checkout-session', {
-      amountCents,
-      currency: 'usd',
-      description
+    const session = await api.post<CheckoutSessionResponse>('/v1/agent/topup', {
+      amount_cents: amountCents
     });
 
     if (options.json || values.json) {
@@ -144,24 +138,24 @@ export default async function topup(
     }
 
     console.log();
-    success(`Checkout session created: ${dim(session.sessionId)}`);
-    info(`Amount: ${bold(`$${(session.amountCents / 100).toFixed(2)} ${session.currency.toUpperCase()}`)}`);
-    info(`URL expires: ${session.expiresAt}`);
+    success(`Checkout session created: ${dim(session.session_id)}`);
+    info(`Amount: ${bold(`$${(session.amount_cents / 100).toFixed(2)}`)}`);
+    info(`Mode: ${dim(session.mode)}`);
 
     if (values.print) {
       info(dim('Open this URL in your browser to complete payment:'));
-      console.log(session.checkoutUrl);
+      console.log(session.url);
       console.log();
       info('After paying, run `hebrah usage` to verify your balance updated.');
       return 0;
     }
 
-    const opened = await openBrowser(session.checkoutUrl);
+    const opened = await openBrowser(session.url);
     if (opened) {
       info(`Opened in your browser. Complete payment there.`);
     } else {
       warn('Could not auto-open a browser. Open this URL manually:');
-      console.log(session.checkoutUrl);
+      console.log(session.url);
     }
     console.log();
     info('After paying, run `hebrah usage` to verify your balance updated.');
@@ -226,43 +220,6 @@ async function interactiveTopup(options: Record<string, unknown>): Promise<numbe
   // Re-enter with --amount flag so the rest of the logic reuses the same path
   const fakeArgv = ['--amount', (preset.usdCents / 100).toFixed(2), '--yes'];
   return topup(fakeArgv, { ...options, _argv: fakeArgv });
-}
-
-async function openPortal(printOnly: boolean, _options: Record<string, unknown>): Promise<number> {
-  const creds = loadCredentials();
-  if (!creds && !process.env.HEBRAH_API_KEY) {
-    error('Not logged in. Run `hebrah signup` or `hebrah login` first.');
-    return 2;
-  }
-
-  try {
-    const portal = await api.post<PortalSessionResponse>('/v1/billing/portal', {
-      returnUrl: 'https://hebrah.com/pricing'
-    });
-
-    if (printOnly) {
-      console.log(portal.portalUrl);
-      return 0;
-    }
-
-    const opened = await openBrowser(portal.portalUrl);
-    if (opened) {
-      success('Opened Stripe Customer Portal in your browser.');
-      info('Manage subscription, invoices, and payment methods.');
-    } else {
-      warn('Could not auto-open a browser. Open this URL manually:');
-      console.log(portal.portalUrl);
-    }
-    return 0;
-  } catch (err) {
-    if (err instanceof ApiError) {
-      error(err.message);
-      if (err.suggestion) info(err.suggestion);
-      return 4;
-    }
-    error((err as Error).message);
-    return 4;
-  }
 }
 
 async function openBrowser(url: string): Promise<boolean> {
