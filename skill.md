@@ -166,15 +166,19 @@ Restart your MCP client. The 5 tools become available:
 
 ```bash
 npm install -g @hebrah/cli
-hebrah signup              # creates account
-hebrah discover            # lists targets
-hebrah connect <target>    # opens connection
-hebrah query <conn>        # executes query
-hebrah audit <conn>        # shows audit events
-hebrah audit export <conn> # exports as JSON
-hebrah revoke <conn>       # closes connection
-hebrah whoami              # shows account + balance
-hebrah usage               # shows metering
+hebrah signup                    # creates account
+hebrah discover                  # lists targets
+hebrah connect <target>          # opens connection
+hebrah query <conn>              # executes query
+hebrah audit <conn>              # shows audit events
+hebrah audit export <conn>       # exports as JSON
+hebrah revoke <conn>             # closes connection
+hebrah relay enroll --target <pg-uri> --scopes <...>   # mint enrollment token
+hebrah relay list                # list customer-side relays
+hebrah relay status <relay_id>   # show one relay
+hebrah relay revoke <relay_id>   # cut off a relay
+hebrah whoami                    # shows account + balance
+hebrah usage                     # shows metering
 ```
 
 ## Pricing (Monid-style metered)

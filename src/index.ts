@@ -32,6 +32,7 @@ const COMMANDS: Record<string, CommandDescriptor> = {
   query: { description: 'Execute query through connection', handler: () => import('./commands/query.js') },
   audit: { description: 'Show / verify / export audit events', handler: () => import('./commands/audit.js') },
   topup: { description: 'Add credit via Stripe Checkout', handler: () => import('./commands/topup.js') },
+  relay: { description: 'Manage customer-side data relays (enroll/list/status/revoke)', handler: () => import('./commands/relay.js') },
   skill: { description: 'Show the SKILL.md', handler: async () => (await import('./commands/skill.js')) as { default: (args: string[], options: Record<string, unknown>) => Promise<number> } },
   version: { description: 'Show version', handler: async () => { console.log(`hebrah ${PACKAGE_VERSION}`); } },
   help: { description: 'Show help', handler: async () => { showHelp(); } }
@@ -138,6 +139,9 @@ Commands:
 
   Billing:
     topup               Add credit via Stripe Checkout
+
+  Relay:
+    relay               Manage customer-side data relays
 
   Help:
     skill               Show the SKILL.md
