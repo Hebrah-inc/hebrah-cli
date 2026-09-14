@@ -18,7 +18,7 @@ const PACKAGE_VERSION = JSON.parse(
 // Command registry (Wave 1)
 const COMMANDS: Record<string, CommandDescriptor> = {
   signup: { description: 'Create a new agent account', handler: () => import('./commands/signup.js') },
-  login: { description: 'Load existing credentials', handler: () => import('./commands/login.js') },
+  login: { description: 'Authenticate via browser or API key', handler: () => import('./commands/login.js') },
   logout: { description: 'Remove local credentials', handler: () => import('./commands/logout.js') },
   whoami: { description: 'Show account info + balance', handler: () => import('./commands/whoami.js') },
   usage: { description: 'Show metering for current period', handler: () => import('./commands/usage.js') },

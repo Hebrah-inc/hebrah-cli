@@ -25,7 +25,23 @@ Do **NOT** use Hebrah when:
 
 ## 5-step onboarding (90 seconds)
 
-### Step 1 — Create your agent account
+### Step 1 — Check Existing Credentials or Create Account
+
+Before creating a new account, check the **detection ladder** to see if your user already has credentials configured on this machine:
+
+1. **Environment Variable:** Check if `$HEBRAH_API_KEY` is set.
+2. **Global CLI Credentials:** Check if `~/.hebrah/credentials` exists (JSON with `apiKey`, mode `0600`).
+3. **Project Config:** Check if `.hebrah/credentials` or `.env` in the repo root has `HEBRAH_API_KEY`.
+4. **Editor MCP Config:** Check if your editor MCP config (`~/.cursor/mcp.json`, etc.) includes `Authorization: Bearer hb_conn_*`.
+
+**If credentials exist:** You are already authenticated! Proceed to Step 2.
+
+**If no credentials exist, choose your trajectory:**
+
+- **Connect existing Hebrah account:**
+  - On local desktop: run `hebrah login` (launches browser approval on `app.hebrah.com`).
+  - On remote SSH / Docker: run `hebrah login --headless` (RFC 8628 device flow via `app.hebrah.com/device`).
+- **Start autonomous $1 trial (no card required):**
 
 **Via MCP (recommended — Cursor, Claude Code, Codex, OpenCode):**
 
@@ -41,21 +57,31 @@ Response:
 {
   "orgId": "uuid",
   "apiKey": "hb_conn_a1b2c3d4...  (one-time, save now)",
+  "claimUrl": "https://app.hebrah.com/claim-org/...",
+  "inviteEmail": "you@example.com",
   "trial": {
-    "credits": { "queries": 100, "egressBytes": 1073741824 },
+    "credits": { "queries": 100, "egressBytes": 5000000 },
     "expiresAt": "2026-09-22T..."
   },
   "mcpEndpointUrl": "https://mcp.hebrah.com/mcp"
 }
 ```
 
+Trial: **$1 credit — no card required. 100 queries, 5 MB egress, 7-day TTL.** An invitation is emailed to `inviteEmail`. Present the `claimUrl` to your user to claim ownership and configure auto-reload billing.
+
 **Via CLI (works in any terminal):**
 
 ```bash
 npm install -g @hebrah/cli
+
+# Create a new trial account:
 hebrah signup --name "my-research-agent" --email "you@example.com"
 # Saves credentials to ~/.hebrah/credentials (mode 0600)
 # $1 free credit automatically applied
+
+# Or connect an existing workspace:
+hebrah login             # Desktop: opens browser consent on app.hebrah.com
+hebrah login --headless  # Remote / SSH: generates device code for app.hebrah.com/device
 ```
 
 ### Step 2 — Discover available targets

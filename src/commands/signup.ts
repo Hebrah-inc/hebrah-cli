@@ -21,6 +21,8 @@ interface SignupResponse {
     expiresAt: string;
   };
   mcpEndpointUrl?: string;
+  claimUrl?: string;
+  inviteEmail?: string;
 }
 
 export default async function signup(
@@ -96,6 +98,11 @@ export default async function signup(
       info(`Trial expires: ${result.trial.expiresAt}`);
       if (result.mcpEndpointUrl) {
         info(`MCP endpoint: ${result.mcpEndpointUrl}`);
+      }
+      if (result.claimUrl) {
+        console.log();
+        info(`Claim URL: ${bold(result.claimUrl)}`);
+        info(`An invite was sent to ${inviteEmail ?? result.inviteEmail}. The billing owner should visit this URL to claim ownership.`);
       }
       console.log();
       info('Next: `hebrah discover` to see available targets.');
