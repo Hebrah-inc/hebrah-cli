@@ -97,8 +97,8 @@ sftp://demo-sftp.hebrah.com             sftp         Settlement reconciliation f
 https://demo-fhir.hebrah.com            fhir         Synthetic EHR (FHIR R4)            healthcare  healthy
 https://demo-rest.hebrah.com            http_rest    Public REST research endpoints     developer   healthy
 sqlite://demo-research.db               sqlite       Local research DB                  developer   healthy
-…17 more demo sandboxes (Stripe, Notion, Slack, Linear, Airtable, Google Drive, MQTT, HL7 ADT, X12 EDI, Salesforce, HubSpot, GA4, OpenPanel, X, LinkedIn, Neo4j, Qdrant).
-`hebrah discover` lists all 39 targets across 10 packs — plus live account connectors connected with read-only credentials.
+…20 more demo sandboxes (Stripe, Notion, Slack, Linear, Airtable, Google Drive, MQTT, HL7 ADT, X12 EDI, Salesforce, HubSpot, Twenty CRM, GA4, OpenPanel, PostHog, X, LinkedIn, Reddit, Neo4j, Qdrant).
+`hebrah discover` lists all 45 targets across 10 packs — plus live account connectors connected with read-only credentials.
 ```
 
 ```bash
@@ -224,7 +224,7 @@ Stripe anytime at [hebrah.com/pricing](https://hebrah.com/pricing).
 ## What you CAN do
 
 - Create an agent account in 90 seconds with $1 trial credit
-- Connect to any of 39 targets across 10 packs (22 demo sandboxes + 17 live account connectors)
+- Connect to any of 45 targets across 10 packs (25 demo sandboxes + 20 live account connectors)
 - Run scoped queries with audit-trail evidence
 - Verify audit hash chain integrity
 - Export audit logs as tamper-evident JSON
