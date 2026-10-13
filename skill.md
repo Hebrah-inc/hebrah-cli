@@ -41,14 +41,14 @@ Before creating a new account, check the **detection ladder** to see if your use
 - **Connect existing Hebrah account:**
   - On local desktop: run `hebrah login` (launches browser approval on `app.hebrah.com`).
   - On remote SSH / Docker: run `hebrah login --headless` (RFC 8628 device flow via `app.hebrah.com/device`).
-- **Start autonomous $1 trial (no card required):**
+- **Start autonomous $5 trial (no card required):**
 
 **Via MCP (recommended — Cursor, Claude Code, Codex, OpenCode):**
 
 MCP server: `https://mcp.hebrah.com/mcp`
 
 ```
-hebrah_create_account orgName="my-research-agent" inviteEmail="you@example.com"
+hebrah_create_account orgName="clinic-research-agent" inviteEmail="developer@hospital.org"
 ```
 
 Response:
@@ -58,16 +58,16 @@ Response:
   "orgId": "uuid",
   "apiKey": "hb_conn_a1b2c3d4...  (one-time, save now)",
   "claimUrl": "https://app.hebrah.com/claim-org/...",
-  "inviteEmail": "you@example.com",
+  "inviteEmail": "developer@hospital.org",
   "trial": {
-    "credits": { "queries": 100, "egressBytes": 5000000 },
-    "expiresAt": "2026-09-22T..."
+    "credits": { "queries": 1000, "egressBytes": 50000000 },
+    "expiresAt": "2026-10-27T..."
   },
   "mcpEndpointUrl": "https://mcp.hebrah.com/mcp"
 }
 ```
 
-Trial: **$1 credit — no card required. 100 queries, 5 MB egress, 7-day TTL.** An invitation is emailed to `inviteEmail`. Present the `claimUrl` to your user to claim ownership and configure auto-reload billing.
+Trial: **$5 credit — no card required. 1,000 queries, 50 MB egress, 14-day TTL.** An invitation is emailed to `inviteEmail` (generic test domains like `@example.com` or disposable emails are blocked by the registration shield; use your corporate or work email). Present the `claimUrl` to your user to claim ownership and configure auto-reload billing.
 
 **Via CLI (works in any terminal):**
 
@@ -75,9 +75,9 @@ Trial: **$1 credit — no card required. 100 queries, 5 MB egress, 7-day TTL.** 
 npm install -g @hebrah/cli
 
 # Create a new trial account:
-hebrah signup --name "my-research-agent" --email "you@example.com"
+hebrah signup --name "clinic-research-agent" --email "developer@hospital.org"
 # Saves credentials to ~/.hebrah/credentials (mode 0600)
-# $1 free credit automatically applied
+# $5 free credit automatically applied
 
 # Or connect an existing workspace:
 hebrah login             # Desktop: opens browser consent on app.hebrah.com
@@ -92,12 +92,13 @@ hebrah discover
 
 ```
 TARGET                                  CONNECTOR    LABEL                              PACK        HEALTH
-postgresql://demo-audit.hebrah.com      postgres     Audit ledger (GL evidence)         audit       healthy
-sftp://demo-sftp.hebrah.com             sftp         Settlement reconciliation files    fintech     healthy
-https://demo-fhir.hebrah.com            fhir         Synthetic EHR (FHIR R4)            healthcare  healthy
-https://demo-rest.hebrah.com            http_rest    Public REST research endpoints     developer   healthy
-sqlite://demo-research.db               sqlite       Local research DB                  developer   healthy
-…25 more demo sandboxes (Stripe, Notion, Slack, Linear, Airtable, Google Drive, MQTT, HL7 ADT, X12 EDI, Salesforce, HubSpot, Twenty CRM, GA4, OpenPanel, PostHog, X, LinkedIn, Reddit, Neo4j, Memgraph, Qdrant, Pinecone, NetSuite ERP, Snowflake, AWS Athena).
+https://demo-fhir.hebrah.com/fhir       fhir         Synthetic EHR (FHIR R4)            healthcare  healthy
+wss://demo-hl7.hebrah.com/ws/alerts     hl7          Real-time ADT clinical feed        healthcare  healthy
+postgresql://demo-clinic.hebrah.com     postgres     Clinic relational DB (PG16)        database    healthy
+sqlite://demo-clinic.db                 sqlite       Clinic embedded SQLite store       database    healthy
+https://demo-qdrant.hebrah.com:6333     qdrant       Clinical embedding vector store    database    healthy
+bolt://demo-neo4j.hebrah.com:7687       neo4j        Medical ontology graph (SNOMED)    database    healthy
+```
 `hebrah discover` lists all 55 targets across 11 packs — plus live account connectors connected with read-only credentials.
 ```
 
@@ -213,7 +214,7 @@ hebrah usage                     # shows metering
 
 | Tier | Price | Includes |
 |---|---|---|
-| **Trial** | $0 | $1 free credit, 100 queries, 1 GB egress, 7-day TTL |
+| **Trial** | $0 | $5 free credit, 1,000 queries, 50 MB egress, 14-day TTL |
 | **Personal** | usage-based | $0.005/query, $0.08/GB egress, no monthly fee |
 | **Pro** | $99/mo + usage | 10k queries/mo included, $0.003/query after, 50 GB egress |
 | **Pay-as-you-go** | top up via Stripe | No monthly fee, just balance |
@@ -223,22 +224,21 @@ Stripe anytime at [hebrah.com/pricing](https://hebrah.com/pricing).
 
 ## What you CAN do
 
-- Create an agent account in 90 seconds with $1 trial credit
-- Connect to any of 55 targets across 11 packs (30 demo sandboxes + 25 live account connectors)
-- Run scoped queries with audit-trail evidence
-- Verify audit hash chain integrity
+- Create an agent account in 90 seconds with $5 trial credit (1,000 queries, 50 MB egress, 14 days)
+- Spin up and connect to Isolated Health Environments per clinic with realistic synthetic EHR data (FHIR R4 REST, HL7 v2 WebSocket stream, X12 EDI)
+- Query attached database pack modules (PostgreSQL 16, SQLite, Qdrant Vector DB, Neo4j Graph DB) via credential-blind handles
+- Allow human team members to connect to environment databases using desktop tools (DBeaver, TablePlus) over secure WireGuard VPN
+- Run scoped queries with audit-trail evidence and actor attribution (agent, human_user, sdk_integration)
+- Verify cryptographic audit hash chain integrity
 - Export audit logs as tamper-evident JSON
-- Revoke any connection instantly
-- Track cost per query in real time
+- Revoke any connection or pause/destroy any environment instantly
+- Track hourly environment runtime and per-query costs in real time
 
-## What you CANNOT do (yet — Wave 2+)
+## What you CANNOT do
 
-- Connect to a customer's own private infrastructure (requires relay enrollment)
-- Production WireGuard data path (use container tier)
-- Write to data sources (read-only)
-- HIPAA/BAA compliant health data (Wave 3)
-- SOC 2 Type II attested (Wave 2/3)
-- Approval-gated writes (Wave 3)
+- Access real PHI or live clinical EHR credentials (Hebrah environments are synthetic-first to eliminate compliance risks)
+- Direct root database credentials for agents (agents query exclusively through credential-blind handles; human developers access DBs over WireGuard)
+- Connect with disposable or generic spam email addresses (registration shield enforces valid corporate/work email)
 
 ## Rules for agents
 

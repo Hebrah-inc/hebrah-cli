@@ -16,7 +16,8 @@ interface Target {
   connector: string;
   label: string;
   description: string;
-  pack: string;
+  pack?: string;
+  pack_id?: string;
   tables?: string[];
   tiers: string[];
   health: 'healthy' | 'degraded' | 'outage' | 'unknown';
@@ -57,7 +58,7 @@ export default async function discover(
       t.target,
       t.connector,
       t.label,
-      t.pack,
+      t.pack_id ?? t.pack ?? '(none)',
       healthBadge(t.health)
     ]);
 

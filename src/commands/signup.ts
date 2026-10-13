@@ -18,7 +18,8 @@ interface SignupResponse {
   apiKey: string;
   trial: {
     credits: { queries: number; egressBytes: number };
-    expiresAt: string;
+    expiresAt?: string;
+    expires_at?: string;
   };
   mcpEndpointUrl?: string;
   claimUrl?: string;
@@ -78,6 +79,8 @@ export default async function signup(
       agentName: orgName
     });
 
+    const expiresAt = result.trial.expiresAt ?? result.trial.expires_at ?? new Date(Date.now() + 7 * 86400000).toISOString();
+
     // Persist credentials locally
     saveCredentials({
       apiKey: result.apiKey,
@@ -86,7 +89,10 @@ export default async function signup(
       keyPrefix: result.apiKey.substring(0, 14) + '...',
       createdAt: new Date().toISOString(),
       mcpEndpointUrl: result.mcpEndpointUrl,
-      trial: result.trial
+      trial: {
+        credits: result.trial.credits,
+        expiresAt
+      }
     });
 
     if (values.json) {
@@ -95,7 +101,7 @@ export default async function signup(
       success(`Account created: ${bold(result.orgName)} (${result.orgId})`);
       info(`API key saved to ~/.hebrah/credentials (mode 0600)`);
       info(`Trial: ${result.trial.credits.queries} queries, ${(result.trial.credits.egressBytes / 1e9).toFixed(2)} GB egress`);
-      info(`Trial expires: ${result.trial.expiresAt}`);
+      info(`Trial expires: ${expiresAt}`);
       if (result.mcpEndpointUrl) {
         info(`MCP endpoint: ${result.mcpEndpointUrl}`);
       }
