@@ -164,28 +164,39 @@ class HebrahApi {
 }
 
 function mapError(status: number, body: unknown): ApiError {
-  const message =
-    typeof body === 'object' && body !== null && 'message' in body
-      ? String((body as any).message)
-      : `HTTP ${status}`;
+  let message = `HTTP ${status}`;
+  if (typeof body === 'object' && body !== null) {
+    if ('message' in body && typeof (body as any).message === 'string') {
+      message = (body as any).message;
+    } else if ('detail' in body) {
+      const detail = (body as any).detail;
+      if (typeof detail === 'string') {
+        message = detail;
+      } else if (typeof detail === 'object' && detail !== null && 'message' in detail) {
+        message = String((detail as any).message);
+      } else {
+        message = JSON.stringify(detail);
+      }
+    }
+  }
 
   const suggestion = (body as any)?.suggestion;
 
   switch (status) {
     case 401:
-      return new ApiError('Authentication required', status, body, 'Run "hebrah login" or set HEBRAH_API_KEY env var.');
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Authentication required', status, body, 'Run "hebrah login" or set HEBRAH_API_KEY env var.');
     case 402:
-      return new ApiError('Quota exceeded', status, body, 'Add credit at hebrah.com/pricing.');
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Quota exceeded', status, body, 'Add credit at hebrah.com/pricing.');
     case 403:
-      return new ApiError('Forbidden', status, body, suggestion);
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Forbidden', status, body, suggestion);
     case 404:
-      return new ApiError('Not found', status, body, suggestion);
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Not found', status, body, suggestion);
     case 409:
-      return new ApiError('Conflict', status, body, suggestion);
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Conflict', status, body, suggestion);
     case 410:
-      return new ApiError('Connection revoked', status, body, 'Open a new connection with "hebrah connect".');
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Connection revoked', status, body, 'Open a new connection with "hebrah connect".');
     case 429:
-      return new ApiError('Rate limited', status, body, 'Back off and retry.');
+      return new ApiError(message !== `HTTP ${status}` ? message : 'Rate limited', status, body, 'Back off and retry.');
     case 500:
     case 502:
     case 503:

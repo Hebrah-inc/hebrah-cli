@@ -34,6 +34,7 @@ const COMMANDS: Record<string, CommandDescriptor> = {
   topup: { description: 'Add credit via Stripe Checkout', handler: () => import('./commands/topup.js') },
   wallet: { description: 'View balance, auto-reload config, and burn rate', handler: () => import('./commands/wallet.js') },
   relay: { description: 'Manage customer-side data relays (enroll/list/status/revoke)', handler: () => import('./commands/relay.js') },
+  env: { description: 'Manage isolated clinic environments (create/list/query/wireguard)', handler: () => import('./commands/env.js') },
   skill: { description: 'Show the SKILL.md', handler: async () => (await import('./commands/skill.js')) as { default: (args: string[], options: Record<string, unknown>) => Promise<number> } },
   version: { description: 'Show version', handler: async () => { console.log(`hebrah ${PACKAGE_VERSION}`); } },
   help: { description: 'Show help', handler: async () => { showHelp(); } }
@@ -141,6 +142,9 @@ Commands:
   Billing:
     topup               Add credit via Stripe Checkout
     wallet              View balance, auto-reload, and burn rate
+
+  Environments:
+    env                 Manage isolated clinic environments (create/list/query/wireguard)
 
   Relay:
     relay               Manage customer-side data relays
