@@ -21,7 +21,7 @@
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { api } from '../api/client.js';
+import { api, safeId } from '../api/client.js';
 import { success, info, warn, error, json, table, dim, green, red, cyan, yellow } from '../output/format.js';
 import { getArgv } from '../util/args.js';
 
@@ -415,7 +415,7 @@ async function revokeRelay(
       }
     }
 
-    await api.delete(`/v1/relays/${relayId}`);
+    await api.delete(`/v1/relays/${safeId(relayId, 'relay_id')}`);
     success(`✓ Relay ${relayId} revoked.`);
     console.log(dim('  (the relay will fail its next mTLS handshake; new certs cannot be minted)'));
     return 0;

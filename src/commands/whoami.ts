@@ -41,20 +41,34 @@ export default async function whoami(
     const usage = await api.get<UsageResponse>('/v1/agent/account/usage');
 
     if (values.json) {
-      console.log(JSON.stringify({ ...creds, usage }, null, 2));
+      const { apiKey: _redacted, ...safeCreds } = creds;
+      console.log(
+        JSON.stringify(
+          {
+            ...safeCreds,
+            apiUrl: api.getBaseUrl(),
+            usage
+          },
+          null,
+          2
+        )
+      );
       return 0;
     }
 
-    kv([
+    const rows: Array<[string, string]> = [
       ['Account', usage.orgName],
       ['Org ID', usage.orgId],
       ['Key prefix', creds.keyPrefix],
+      ['API Endpoint', api.getBaseUrl()],
+      ['Default Env', creds.defaultEnvId ?? '(none)'],
       ['Tier', usage.tier],
       ['Balance', `$${(usage.balanceCents / 100).toFixed(4)}`],
       ['Queries this period', `${usage.queries} / ${usage.quota.queries}`],
       ['Egress this period', `${(usage.egressBytes / 1e6).toFixed(2)} MB / ${(usage.quota.egressBytes / 1e9).toFixed(2)} GB`],
       ['Trial expires', usage.trial?.expiresAt ?? '(not on trial)']
-    ]);
+    ];
+    kv(rows);
 
     return 0;
   } catch (err) {

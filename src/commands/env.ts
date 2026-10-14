@@ -7,35 +7,40 @@
 //   hebrah env create --name <name> [--clinic <type>] [--cohort <cohort>] [--addons <addons>] [--patients <n>] [--beds <n>] [--json]
 //     Provision a dedicated, compliant isolated health environment with synthetic EHR + attachable DBs.
 //
-//   hebrah env status <id> [--json]
+//   hebrah env connect <id> [--name <agent-name>] [--json]
+//     Attach this agent to an isolated clinic environment and set it as the default environment.
+//
+//   hebrah env status [id] [--json]
 //     Show full environment details, clinical endpoints, attached DBs, and connected agents.
 //
-//   hebrah env pause <id> [--json]
+//   hebrah env pause [id] [--json]
 //     Pause an environment to halt hourly resource burn.
 //
-//   hebrah env resume <id> [--json]
+//   hebrah env resume [id] [--json]
 //     Resume a paused environment.
 //
 //   hebrah env destroy <id> [--yes] [--json]
 //     Tear down an environment and release its resources.
 //
-//   hebrah env query <id> "<sql>" [--addon <postgres>] [--json]
+//   hebrah env query [id] "<sql>" [--addon <postgres>] [--json]
 //     Execute a credential-blind query against an attached database module handle.
 //
-//   hebrah env wireguard <id> [--out <file>] [--json]
+//   hebrah env wireguard [id] [--out <file>] [--reveal-private-key] [--json]
 //     Export or print WireGuard mesh VPN configuration for human developer GUI access (DBeaver, TablePlus).
 //
-//   hebrah env scenario <id> --type <scenario> [--patient-id <id>] [--notes <notes>] [--json]
+//   hebrah env scenario [id] --type <scenario> [--patient-id <id>] [--notes <notes>] [--json]
 //     Trigger a synthetic clinical EHR scenario (admit_patient, transfer_patient, discharge_patient, abnormal_lab_alert).
 //
-//   hebrah env db-proxy <id> [--port <port>] [--addon <addon>] [--json]
+//   hebrah env db-proxy [id] [--port <port>] [--addon <addon>] [--json]
 //     Display connection coordinates and guidance for human developer database GUIs over WireGuard.
 
 import { parseArgs } from 'node:util';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync, lstatSync, chmodSync } from 'node:fs';
+import { hostname, platform } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { api } from '../api/client.js';
+import { api, safeId } from '../api/client.js';
+import { loadCredentials, updateCredentials } from '../config/credentials.js';
 import {
   success,
   info,
@@ -54,6 +59,23 @@ import {
   formatCents
 } from '../output/format.js';
 import { getArgv } from '../util/args.js';
+
+function resolveEnvId(explicitId?: string): string | undefined {
+  if (explicitId && explicitId.trim().length > 0) {
+    return explicitId.trim();
+  }
+  if (process.env.HEBRAH_ENV_ID && process.env.HEBRAH_ENV_ID.trim().length > 0) {
+    return process.env.HEBRAH_ENV_ID.trim();
+  }
+  return loadCredentials()?.defaultEnvId;
+}
+
+function redactWireguardPrivateKey(configText: string): string {
+  return configText.replace(
+    /^(\s*PrivateKey\s*=\s*).+$/gim,
+    '$1<redacted — use --out ./wg.conf or --reveal-private-key>'
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Types matching hebrah-api environments endpoints
@@ -143,6 +165,10 @@ export default async function env(
     case 'create':
     case 'new':
       return createEnv(subArgv, { ...options, _argv: subArgv });
+    case 'connect':
+    case 'attach':
+    case 'use':
+      return connectEnv(subArgv, { ...options, _argv: subArgv });
     case 'status':
     case 'show':
     case 'get':
@@ -186,24 +212,26 @@ function showHelp(): void {
 Subcommands:
   list (ls)                    List environments for the current org
   create (new)                 Provision a new isolated clinic environment
-  status (show) <id>           Show details, endpoints, and connected agents
-  pause <id>                   Pause environment (halts hourly resource charge)
-  resume <id>                  Resume a paused environment
+  connect (attach) <id>        Attach this agent to an environment & set default
+  status (show) [id]           Show details, endpoints, and connected agents
+  pause [id]                   Pause environment (halts hourly resource charge)
+  resume [id]                  Resume a paused environment
   destroy (rm) <id>            Tear down an environment
-  query (sql) <id> "<sql>"     Run credential-blind query on attached DB
-  wireguard (wg) <id>          Export WireGuard VPN config for GUI access
-  scenario <id> --type <type>  Trigger a clinical EHR event (HL7 / FHIR)
-  db-proxy <id>                Show developer GUI connection coordinates
+  query (sql) [id] "<sql>"     Run credential-blind query on attached DB
+  wireguard (wg) [id]          Export WireGuard VPN config for GUI access
+  scenario [id] --type <type>  Trigger a clinical EHR event (HL7 / FHIR)
+  db-proxy [id]                Show developer GUI connection coordinates
 
 Flags (global for subcommands):
   --json                       Emit JSON machine-readable output
 
 Examples:
   hebrah env list
+  hebrah env connect 4e39cc5c-f2f5-435c-a844-cf6b5d3bcb94 --name "clinic-agent"
   hebrah env create --name "Pediatric Pilot" --clinic pediatric_specialty --addons postgres,neo4j
-  hebrah env query env-1234 "SELECT * FROM patients LIMIT 5"
-  hebrah env wireguard env-1234 --out ./hebrah-clinic.conf
-  hebrah env scenario env-1234 --type admit_patient --patient-id P-1002
+  hebrah env query "SELECT * FROM patients LIMIT 5"
+  hebrah env wireguard --out ./hebrah-clinic.conf
+  hebrah env scenario --type admit_patient --patient-id P-1002
 `);
 }
 
@@ -325,6 +353,12 @@ async function createEnv(
       addons
     });
 
+    try {
+      updateCredentials({ defaultEnvId: created.id });
+    } catch {
+      // Ignore if credentials haven't been saved to disk (e.g. env-var only auth)
+    }
+
     if (values.json) {
       json(created);
       return 0;
@@ -356,6 +390,90 @@ async function createEnv(
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: connect
+// ---------------------------------------------------------------------------
+
+async function connectEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+
+  const { values } = parseArgs({
+    args: argv.filter((a) => a !== rawEnvId),
+    options: {
+      name: { type: 'string' },
+      'agent-name': { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: false,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  if (!envId) {
+    error('hebrah env connect: environment_id required');
+    console.error('Usage: hebrah env connect <environment_id> [--agent-name <name>] [--json]');
+    return 1;
+  }
+
+  const agentName =
+    typeof values['agent-name'] === 'string'
+      ? values['agent-name']
+      : typeof values.name === 'string'
+        ? values.name
+        : process.env.HEBRAH_AGENT_NAME || `hebrah-cli (${hostname()})`;
+
+  try {
+    const cleanId = safeId(envId, 'environment_id');
+    let detail: EnvironmentDetail;
+    try {
+      detail = await api.post<EnvironmentDetail>(`/v1/environments/${cleanId}/agents/connect`, {
+        agent_name: agentName,
+        cli_version: '0.4.0',
+        platform: `${platform()}-${hostname()}`
+      });
+    } catch {
+      // Fallback if server hasn't deployed /agents/connect yet
+      detail = await api.get<EnvironmentDetail>(`/v1/environments/${cleanId}`);
+    }
+
+    try {
+      updateCredentials({ defaultEnvId: detail.id });
+    } catch {
+      // Ignore if credentials file does not exist
+    }
+
+    if (values.json) {
+      json(detail);
+      return 0;
+    }
+
+    success(`Connected agent ${bold(agentName)} to environment ${bold(detail.name)} (${detail.id})`);
+    console.log();
+    kv([
+      ['Environment ID', detail.id],
+      ['Environment Name', detail.name],
+      ['Status', detail.status === 'active' ? green('active') : yellow(detail.status)],
+      ['Clinic Type', detail.clinic_type],
+      ['Patient Cohort', `${detail.patient_cohort} (${detail.patient_count} patients, ${detail.bed_count} beds)`],
+      ['Attached DBs', (detail.addons || []).join(', ') || 'postgres'],
+      ['FHIR R4 REST', detail.endpoints?.fhir ?? 'n/a'],
+      ['HL7 v2 WebSocket', detail.endpoints?.hl7_ws ?? 'n/a'],
+      ['Default Env Saved', green('yes (~/.hebrah/credentials.json)')]
+    ]);
+    console.log();
+    info(`Run a credential-blind SQL query: hebrah env query ${detail.id} "SELECT * FROM patients LIMIT 5"`);
+    info(`Trigger an HL7 v2 clinical event: hebrah env scenario ${detail.id} --type admit_patient`);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand: status
 // ---------------------------------------------------------------------------
 
@@ -364,10 +482,10 @@ async function statusEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -375,6 +493,7 @@ async function statusEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env status: environment_id required');
     console.error('Usage: hebrah env status <environment_id> [--json]');
@@ -382,7 +501,7 @@ async function statusEnv(
   }
 
   try {
-    const detail = await api.get<EnvironmentDetail>(`/v1/environments/${encodeURIComponent(envId)}`);
+    const detail = await api.get<EnvironmentDetail>(`/v1/environments/${safeId(envId, 'environment_id')}`);
 
     if (values.json) {
       json(detail);
@@ -451,10 +570,10 @@ async function pauseEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -462,6 +581,7 @@ async function pauseEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env pause: environment_id required');
     console.error('Usage: hebrah env pause <environment_id>');
@@ -469,7 +589,7 @@ async function pauseEnv(
   }
 
   try {
-    const updated = await api.post<EnvironmentDetail>(`/v1/environments/${encodeURIComponent(envId)}/pause`);
+    const updated = await api.post<EnvironmentDetail>(`/v1/environments/${safeId(envId, 'environment_id')}/pause`);
 
     if (values.json) {
       json(updated);
@@ -493,10 +613,10 @@ async function resumeEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       json: { type: 'boolean', default: false }
     },
@@ -504,6 +624,7 @@ async function resumeEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env resume: environment_id required');
     console.error('Usage: hebrah env resume <environment_id>');
@@ -511,7 +632,7 @@ async function resumeEnv(
   }
 
   try {
-    const updated = await api.post<EnvironmentDetail>(`/v1/environments/${encodeURIComponent(envId)}/resume`);
+    const updated = await api.post<EnvironmentDetail>(`/v1/environments/${safeId(envId, 'environment_id')}/resume`);
 
     if (values.json) {
       json(updated);
@@ -535,10 +656,10 @@ async function destroyEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       yes: { type: 'boolean', short: 'y', default: false },
       json: { type: 'boolean', default: false }
@@ -547,6 +668,7 @@ async function destroyEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env destroy: environment_id required');
     console.error('Usage: hebrah env destroy <environment_id> [--yes]');
@@ -570,7 +692,7 @@ async function destroyEnv(
 
   try {
     const result = await api.delete<{ ok: boolean; id: string; status: string }>(
-      `/v1/environments/${encodeURIComponent(envId)}`
+      `/v1/environments/${safeId(envId, 'environment_id')}`
     );
 
     if (values.json) {
@@ -595,8 +717,16 @@ async function queryEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
-  const remaining = argv.filter((a) => a !== envId);
+  const firstPositional = argv.find((a) => !a.startsWith('-'));
+  // If firstPositional looks like SQL (contains whitespace or starts with SELECT/WITH/SHOW/EXPLAIN),
+  // treat it as the SQL query and resolve envId from defaultEnvId.
+  const firstLooksLikeSql =
+    typeof firstPositional === 'string' &&
+    (/\s/.test(firstPositional.trim()) ||
+      /^(select|with|show|explain|insert|update|delete)\b/i.test(firstPositional.trim()));
+
+  const rawEnvId = firstLooksLikeSql ? undefined : firstPositional;
+  const remaining = rawEnvId ? argv.filter((a) => a !== rawEnvId) : argv;
 
   // The first non-flag positional in remaining is the SQL query if not passed via --sql
   const { values, positionals } = parseArgs({
@@ -610,6 +740,7 @@ async function queryEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   const sql = values.sql ?? positionals[0];
 
   if (!envId || !sql) {
@@ -622,7 +753,7 @@ async function queryEnv(
 
   try {
     const res = await api.post<DbQueryResult>(
-      `/v1/environments/${encodeURIComponent(envId)}/db/query`,
+      `/v1/environments/${safeId(envId, 'environment_id')}/db/query`,
       {
         sql,
         addon,
@@ -665,51 +796,79 @@ async function wireguardEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       out: { type: 'string' },
+      'reveal-private-key': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false }
     },
     allowPositionals: false,
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env wireguard: environment_id required');
-    console.error('Usage: hebrah env wireguard <environment_id> [--out <file.conf>] [--json]');
+    console.error('Usage: hebrah env wireguard <environment_id> [--out <file.conf>] [--reveal-private-key] [--json]');
     return 1;
   }
 
+  const revealKey = Boolean(values['reveal-private-key']);
+
   try {
     const wg = await api.get<WireguardConfigResult>(
-      `/v1/environments/${encodeURIComponent(envId)}/wireguard/config`
+      `/v1/environments/${safeId(envId, 'environment_id')}/wireguard/config`
     );
-
-    if (values.json) {
-      json(wg);
-      return 0;
-    }
 
     const configText = wg.config_text || (wg as any).config || '';
     const outPath = typeof values.out === 'string' ? values.out : undefined;
+
     if (outPath) {
-      writeFileSync(outPath, configText, 'utf-8');
-      success(`WireGuard configuration written to ${bold(outPath)}`);
+      if (existsSync(outPath)) {
+        const st = lstatSync(outPath);
+        if (st.isSymbolicLink()) {
+          throw new Error(`Security error: Refusing to write WireGuard private key to symlink (${outPath})`);
+        }
+      }
+      writeFileSync(outPath, configText, { encoding: 'utf-8', mode: 0o600 });
+      try {
+        chmodSync(outPath, 0o600);
+      } catch {
+        // Ignore on platforms that don't support POSIX modes
+      }
+      if (values.json) {
+        json({
+          ...wg,
+          config_text: revealKey ? configText : redactWireguardPrivateKey(configText),
+          saved_to: outPath,
+          mode: '0600'
+        });
+        return 0;
+      }
+      success(`WireGuard configuration written to ${bold(outPath)} (permissions 0600)`);
       console.log();
       info(`Import ${outPath} into WireGuard app or run: "wg-quick up ${outPath}"`);
       info(`Then connect DBeaver / TablePlus directly to ${wg.client_ip.replace('/32', '')}:5432`);
       return 0;
     }
 
+    if (values.json) {
+      json({
+        ...wg,
+        config_text: revealKey ? configText : redactWireguardPrivateKey(configText)
+      });
+      return 0;
+    }
+
     console.log(bold(`WireGuard Mesh Tunnel Config — ${envId}:`));
     console.log(dim('──────────────────────────────────────────────────────────────────'));
-    console.log(configText);
+    console.log(revealKey ? configText : redactWireguardPrivateKey(configText));
     console.log(dim('──────────────────────────────────────────────────────────────────'));
     console.log();
-    info('Save to a file using "--out ./hebrah.conf" and import into your WireGuard client.');
+    info('Save full configuration with private key using "--out ./hebrah.conf" (writes with 0600 permissions).');
     return 0;
   } catch (err) {
     error((err as Error).message);
@@ -726,10 +885,10 @@ async function scenarioEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       type: { type: 'string' },
       scenario: { type: 'string' },
@@ -742,6 +901,7 @@ async function scenarioEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   const scenarioType =
     typeof values.scenario === 'string'
       ? values.scenario
@@ -766,7 +926,7 @@ async function scenarioEnv(
 
   try {
     const res = await api.post<ClinicScenarioResult>(
-      `/v1/environments/${encodeURIComponent(envId)}/clinic/scenarios`,
+      `/v1/environments/${safeId(envId, 'environment_id')}/clinic/scenarios`,
       {
         scenario: scenarioType,
         patient_id: patientId,
@@ -803,10 +963,10 @@ async function dbProxyEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const envId = argv.find((a) => !a.startsWith('-'));
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== envId),
+    args: argv.filter((a) => a !== rawEnvId),
     options: {
       port: { type: 'string', default: '5432' },
       addon: { type: 'string', default: 'postgres' },
@@ -816,6 +976,7 @@ async function dbProxyEnv(
     strict: false
   });
 
+  const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env db-proxy: environment_id required');
     console.error('Usage: hebrah env db-proxy <environment_id> [--port 5432] [--addon postgres] [--json]');
@@ -823,14 +984,14 @@ async function dbProxyEnv(
   }
 
   try {
-    const detail = await api.get<EnvironmentDetail>(`/v1/environments/${encodeURIComponent(envId)}`);
+    const detail = await api.get<EnvironmentDetail>(`/v1/environments/${safeId(envId, 'environment_id')}`);
 
     const wgIp = detail.wireguard_ip ?? '10.42.0.1';
     const port = typeof values.port === 'string' ? (parseInt(values.port, 10) || 5432) : 5432;
     const addon = typeof values.addon === 'string' ? values.addon : 'postgres';
 
     const infoData = {
-      environment_id: envId,
+      environment_id: detail.id,
       host: wgIp,
       port,
       database: 'clinic_ehr',
@@ -845,7 +1006,7 @@ async function dbProxyEnv(
       return 0;
     }
 
-    console.log(bold(`Developer Database GUI Coordinates — ${detail.name} (${envId})`));
+    console.log(bold(`Developer Database GUI Coordinates — ${detail.name} (${detail.id})`));
     console.log();
     kv([
       ['Host (WireGuard)', wgIp],
@@ -857,10 +1018,10 @@ async function dbProxyEnv(
     ]);
     console.log();
     info('Instructions for DBeaver / TablePlus:');
-    console.log(dim('  1. Run "hebrah env wireguard ' + envId + ' --out ./wg.conf" to download VPN config'));
+    console.log(dim('  1. Run "hebrah env wireguard ' + detail.id + ' --out ./wg.conf" to download VPN config'));
     console.log(dim('  2. Activate WireGuard connection'));
     console.log(dim(`  3. Point DBeaver or TablePlus to host ${wgIp}:${port}`));
-    console.log(dim('  4. AI agents continue accessing data credential-blind via "hebrah env query ' + envId + ' <sql>"'));
+    console.log(dim('  4. AI agents continue accessing data credential-blind via "hebrah env query ' + detail.id + ' <sql>"'));
 
     return 0;
   } catch (err) {

@@ -4,27 +4,32 @@
 [![Node 22+](https://img.shields.io/badge/node-%3E%3D22-blueviolet)](./package.json)
 [![npm](https://img.shields.io/npm/v/@hebrah/cli)](https://www.npmjs.com/package/@hebrah/cli)
 
-The terminal-native CLI for **Hebrah** — the data layer for AI agents.
+The terminal-native CLI for **Hebrah** — Isolated Health Environments & credential-blind data layer for AI agents.
 
 Install:
 
 ```bash
 npm install -g @hebrah/cli
-hebrah signup        # 90 seconds, $1 trial credit, no card
+hebrah signup --name "clinic-agent" --headless   # 90 seconds, $5 free trial credit, no card
 ```
-
-> Companion to the [Wave 1 strategy doc](https://github.com/Hebrah-inc/hebrah-strategy-docs/blob/main/documentation/hebrah-strategy-2026-09-cli.md) in the `hebrah-strategy-docs` repo.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `hebrah signup` | Create a new agent account |
-| `hebrah login` | Load existing credentials |
+| `hebrah signup` | Create a new agent account ($5.00 trial credit) |
+| `hebrah login` | Authenticate via browser loopback, device code, or API key (`hb_conn_*` / `hb_pat_*`) |
 | `hebrah logout` | Remove local credentials |
-| `hebrah whoami` | Show account info + balance |
+| `hebrah whoami` | Show account info, API endpoint, default environment, and balance |
 | `hebrah usage` | Show metering for current period |
-| `hebrah discover` | List available targets |
+| `hebrah env list` | List isolated clinic environments |
+| `hebrah env create` | Provision an isolated clinic environment (FHIR R4 + HL7 v2 + DB addons) |
+| `hebrah env connect <env_id>` | Attach agent to an existing isolated clinic environment and set default |
+| `hebrah env status [env_id]` | Show environment details, endpoints, DB modules, and connected agents |
+| `hebrah env query [env_id] "<sql>"` | Execute credential-blind SQL query against attached DB module |
+| `hebrah env scenario [env_id] --type <t>` | Trigger synthetic clinical EHR scenario (HL7 v2 / FHIR) |
+| `hebrah env wireguard [env_id]` | Export WireGuard VPN config (mode 0600) for developer GUI (DBeaver/TablePlus) |
+| `hebrah discover` | List available connector targets |
 | `hebrah inspect <target>` | Show scope grammar for a target |
 | `hebrah packs` | List connector packs |
 | `hebrah connect <target>` | Open a scoped connection |
@@ -40,18 +45,23 @@ hebrah signup        # 90 seconds, $1 trial credit, no card
 | `hebrah help` | Show help |
 | `hebrah version` | Show version |
 
-## 90-second onboarding
+## Isolated Clinic Environment Onboarding
 
 ```bash
 npm install -g @hebrah/cli
-hebrah signup --name "research-agent" --email "you@example.com"
-hebrah discover
-hebrah connect postgresql://demo-audit.hebrah.com \
-  --scopes gl:read,period:2025-Q4,accounts:1000-3999
-hebrah query <conn_id> --sql "SELECT * FROM gl LIMIT 10"
-hebrah audit <conn_id> --verify
-hebrah audit <conn_id> --export json > audit.json
-hebrah revoke <conn_id>
+
+# Option A: Connect to an existing account & clinic environment via browser
+hebrah login --env-id <environment_id>
+
+# Option B: Connect non-interactively with a token from the dashboard
+hebrah login --key hb_pat_... --env-id <environment_id>
+
+# Option C: Headless agent self-signup ($5.00 free credit)
+hebrah signup --name "clinic-agent" --headless
+hebrah env create --name "Memorial Hospital Integration" --clinic hospital_system --addons postgres
+
+# Query attached PostgreSQL 16 credential-blind
+hebrah env query "SELECT id, first_name, last_name, primary_diagnosis FROM patients LIMIT 5"
 ```
 
 ## Output formats
@@ -59,16 +69,16 @@ hebrah revoke <conn_id>
 Every command supports `--json` for machine-readable output:
 
 ```bash
-hebrah discover --json
-hebrah query <conn> --sql "..." --json
+hebrah env status --json
+hebrah env query "SELECT COUNT(*) FROM patients" --json
 hebrah usage --json
 ```
 
 ## Config
 
-- **Credentials:** `~/.hebrah/credentials` (mode 0600)
-- **Env override:** `HEBRAH_API_KEY=hb_conn_*`
-- **Self-hosted:** `HEBRAH_API_URL=https://api.staging.hebrah.com`
+- **Credentials:** `~/.hebrah/credentials` (mode `0600`, symlink-protected, origin-pinned)
+- **Env override:** `HEBRAH_API_KEY=hb_conn_*` (or `hb_pat_*`)
+- **Self-hosted / Staging:** `hebrah login --app-url https://... --api-url https://...` (persisted automatically)
 
 ## Build
 
@@ -80,10 +90,10 @@ pnpm test
 
 ## Related
 
-- [hebrah.com/SKILL.md](https://hebrah.com/SKILL.md) — public SKILL.md (Wave 1 onboarding doc)
+- [hebrah.com/SKILL.md](https://hebrah.com/SKILL.md) — public SKILL.md
 - [hebrah.com](https://hebrah.com) — marketing site
 - [@hebrah/sdk](https://www.npmjs.com/package/@hebrah/sdk) — official Node.js SDK
-- [github.com/Hebrah-inc](https://github.com/Hebrah-inc) — org with strategy docs and demos
+- [github.com/Hebrah-inc](https://github.com/Hebrah-inc) — official GitHub organization
 
 ## License
 

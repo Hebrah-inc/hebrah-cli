@@ -1,22 +1,30 @@
-// Hebrah API client — HTTP wrapper for api.hebrah.com.
+// Hebrah API client — HTTP wrapper for the Hebrah control plane.
 //
-// Wave 1: all endpoints hit the merged hebrah-api control plane.
-// Auth: hb_conn_* key via Authorization: Bearer header.
-//
-// Usage:
-//   import { api } from '../api/client.js';
-//   const account = await api.post('/v1/agent/account', { orgName, inviteEmail });
-//
-// Timeout behavior:
-//   - Default: 30s (overridable via HEBRAH_API_TIMEOUT_MS env var)
-//   - Per-call: pass `{ timeoutMs: 5000 }` to get/post/delete
-//   - On timeout: throws TimeoutError with a friendly message + suggestion
+// Security hardening (S-2 & S-6):
+//   - Enforces HTTPS for all non-loopback hosts and validates trusted Hebrah hostnames.
+//   - Pins credentials to the API origin they were issued for (prevents HEBRAH_API_URL token exfiltration).
+//   - Validates and encodes resource IDs via safeId() and blocks path traversal ('..') in request paths.
+//   - Persists and resolves apiUrl from ~/.hebrah/credentials so staging/custom envs work seamlessly.
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadCredentials } from '../config/credentials.js';
 
-const DEFAULT_API_URL = process.env.HEBRAH_API_URL ?? 'https://api.hebrah.com';
+const DEFAULT_PROD_API_URL = 'https://api.hebrah.com';
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function loadPackageVersion(): string {
+  try {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
+    return pkg.version || '0.4.0';
+  } catch {
+    return '0.4.0';
+  }
+}
+
+export const CLI_VERSION = loadPackageVersion();
 
 function parseTimeoutMs(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
@@ -26,15 +34,9 @@ function parseTimeoutMs(raw: string | undefined, fallback: number): number {
 
 const DEFAULT_TIMEOUT_MS = parseTimeoutMs(process.env.HEBRAH_API_TIMEOUT_MS, 30000);
 
-interface RequestOptions {
+export interface RequestOptions {
   /** Per-call timeout override in milliseconds. */
   timeoutMs?: number;
-}
-
-interface ApiResponse<T> {
-  status: number;
-  data: T;
-  headers: Record<string, string>;
 }
 
 export class ApiError extends Error {
@@ -60,29 +62,146 @@ export class TimeoutError extends Error {
   }
 }
 
-class HebrahApi {
-  private baseUrl: string;
-  private apiKey: string | null;
+/**
+ * Validate a resource identifier (envId, connId, relayId) against path traversal
+ * and URL injection before interpolating into an API path.
+ */
+export function safeId(rawId: string, label = 'id'): string {
+  if (!rawId || typeof rawId !== 'string') {
+    throw new Error(`Invalid ${label}: value is required.`);
+  }
+  const trimmed = rawId.trim();
+  if (
+    trimmed === '.' ||
+    trimmed === '..' ||
+    trimmed.includes('..') ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    !/^[a-zA-Z0-9._:-]+$/.test(trimmed)
+  ) {
+    throw new Error(`Invalid ${label} "${rawId}": contains disallowed characters or path traversal.`);
+  }
+  return encodeURIComponent(trimmed);
+}
 
-  constructor() {
-    this.baseUrl = DEFAULT_API_URL;
-    this.apiKey = this.loadApiKey();
+function isTrustedHebrahHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return true;
+  if (host === 'hebrah.com' || host.endsWith('.hebrah.com')) return true;
+  if (/^hebrah-[a-z0-9-]+-[a-z0-9]+-[a-z0-9]+\.a\.run\.app$/.test(host)) return true;
+  if (process.env.HEBRAH_ALLOW_CUSTOM_HOST === '1') return true;
+  return false;
+}
+
+/**
+ * Validate and normalize an API or App base URL.
+ * Enforces HTTPS for all non-loopback hosts and checks trusted Hebrah host patterns.
+ */
+export function validateApiBaseUrl(rawUrl: string): string {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    throw new Error('API URL is required.');
+  }
+  if (/[\x00-\x1f\x7f]/.test(rawUrl)) {
+    throw new Error('API URL contains invalid control characters.');
   }
 
-  private loadApiKey(): string | null {
-    if (process.env.HEBRAH_API_KEY) return process.env.HEBRAH_API_KEY;
-    try {
-      const credPath = join(homedir(), '.hebrah', 'credentials');
-      const raw = readFileSync(credPath, 'utf-8');
-      const creds = JSON.parse(raw);
-      return creds.apiKey ?? null;
-    } catch {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    throw new Error(`Invalid URL format: "${rawUrl}"`);
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const isLoopback = LOOPBACK_HOSTS.has(host);
+
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopback)) {
+    throw new Error(
+      `Security error: refusing cleartext HTTP connection to non-loopback host "${host}". Use https://.`
+    );
+  }
+
+  if (!isTrustedHebrahHost(host)) {
+    throw new Error(
+      `Security error: untrusted Hebrah host "${host}". Set HEBRAH_ALLOW_CUSTOM_HOST=1 only if connecting to a self-hosted control plane.`
+    );
+  }
+
+  return parsed.origin;
+}
+
+/**
+ * Infer the matching API base URL from a Hebrah Dashboard (App) URL when --api-url is not explicitly passed.
+ */
+export function inferApiUrlFromAppUrl(appUrl: string): string {
+  const origin = validateApiBaseUrl(appUrl);
+  const parsed = new URL(origin);
+  const host = parsed.hostname.toLowerCase();
+
+  // Cloud Run staging/prod pattern: hebrah-staging-app-xxxx.a.run.app -> hebrah-staging-api-xxxx.a.run.app
+  if (host.includes('-app-')) {
+    return `${parsed.protocol}//${host.replace('-app-', '-api-')}`;
+  }
+  if (host === 'app.hebrah.com' || host === 'hebrah.com' || host === 'www.hebrah.com') {
+    return 'https://api.hebrah.com';
+  }
+  if (host.startsWith('app.')) {
+    return `${parsed.protocol}//api.${host.slice(4)}${parsed.port ? `:${parsed.port}` : ''}`;
+  }
+  if (LOOPBACK_HOSTS.has(host)) {
+    return `${parsed.protocol}//${host}:8000`;
+  }
+  return origin;
+}
+
+class HebrahApi {
+  private explicitBaseUrl: string | null = null;
+  private explicitApiKey: string | null = null;
+
+  setBaseUrl(url: string | null): void {
+    this.explicitBaseUrl = url ? validateApiBaseUrl(url) : null;
+  }
+
+  getBaseUrl(): string {
+    if (this.explicitBaseUrl) {
+      return this.explicitBaseUrl;
+    }
+    if (process.env.HEBRAH_API_URL) {
+      return validateApiBaseUrl(process.env.HEBRAH_API_URL);
+    }
+    const creds = loadCredentials();
+    if (creds?.apiUrl) {
+      return validateApiBaseUrl(creds.apiUrl);
+    }
+    return DEFAULT_PROD_API_URL;
+  }
+
+  setApiKey(key: string | null): void {
+    this.explicitApiKey = key;
+  }
+
+  private resolveApiKeyForOrigin(targetOrigin: string): string | null {
+    if (this.explicitApiKey) {
+      return this.explicitApiKey;
+    }
+    if (process.env.HEBRAH_API_KEY) {
+      return process.env.HEBRAH_API_KEY;
+    }
+
+    const creds = loadCredentials();
+    if (!creds?.apiKey) {
       return null;
     }
-  }
 
-  setApiKey(key: string): void {
-    this.apiKey = key;
+    // Origin Pinning (Finding S-2): ensure saved credentials are only sent to their pinned API origin
+    const pinnedOrigin = creds.apiUrl ? validateApiBaseUrl(creds.apiUrl) : DEFAULT_PROD_API_URL;
+    if (targetOrigin !== pinnedOrigin) {
+      throw new Error(
+        `Security error: stored credentials are pinned to ${pinnedOrigin}, refusing to send token to ${targetOrigin}. Run "hebrah login --api-url ${targetOrigin}" or set HEBRAH_API_KEY.`
+      );
+    }
+
+    return creds.apiKey;
   }
 
   async get<T>(path: string, params?: Record<string, string>, opts?: RequestOptions): Promise<T> {
@@ -104,7 +223,17 @@ class HebrahApi {
     params?: Record<string, string>,
     opts?: RequestOptions
   ): Promise<T> {
-    const url = new URL(path, this.baseUrl);
+    if (!path.startsWith('/v1/') || path.includes('..') || path.includes('\\')) {
+      throw new Error(`Security error: invalid API request path "${path}".`);
+    }
+
+    const baseOrigin = this.getBaseUrl();
+    const url = new URL(path, baseOrigin);
+
+    if (url.origin !== baseOrigin || !url.pathname.startsWith('/v1/') || url.pathname.includes('..')) {
+      throw new Error(`Security error: path traversal detected in "${path}".`);
+    }
+
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         url.searchParams.set(k, v);
@@ -114,11 +243,12 @@ class HebrahApi {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
-      'User-Agent': `hebrah-cli/0.1.0 (Node ${process.version})`
+      'User-Agent': `hebrah-cli/${CLI_VERSION} (Node ${process.version})`
     };
 
-    if (this.apiKey) {
-      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    const apiKey = this.resolveApiKeyForOrigin(baseOrigin);
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
     }
 
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -147,7 +277,6 @@ class HebrahApi {
 
       return parsed as T;
     } catch (err) {
-      // Distinguish timeout (AbortError) from other failures.
       if (err instanceof ApiError) throw err;
       if ((err as { name?: string })?.name === 'AbortError') {
         throw new TimeoutError(
@@ -184,9 +313,19 @@ function mapError(status: number, body: unknown): ApiError {
 
   switch (status) {
     case 401:
-      return new ApiError(message !== `HTTP ${status}` ? message : 'Authentication required', status, body, 'Run "hebrah login" or set HEBRAH_API_KEY env var.');
+      return new ApiError(
+        message !== `HTTP ${status}` ? message : 'Authentication required',
+        status,
+        body,
+        'Run "hebrah login" or set HEBRAH_API_KEY env var.'
+      );
     case 402:
-      return new ApiError(message !== `HTTP ${status}` ? message : 'Quota exceeded', status, body, 'Add credit at hebrah.com/pricing.');
+      return new ApiError(
+        message !== `HTTP ${status}` ? message : 'Quota exceeded',
+        status,
+        body,
+        'Add credit at hebrah.com/pricing.'
+      );
     case 403:
       return new ApiError(message !== `HTTP ${status}` ? message : 'Forbidden', status, body, suggestion);
     case 404:
@@ -194,9 +333,19 @@ function mapError(status: number, body: unknown): ApiError {
     case 409:
       return new ApiError(message !== `HTTP ${status}` ? message : 'Conflict', status, body, suggestion);
     case 410:
-      return new ApiError(message !== `HTTP ${status}` ? message : 'Connection revoked', status, body, 'Open a new connection with "hebrah connect".');
+      return new ApiError(
+        message !== `HTTP ${status}` ? message : 'Connection revoked',
+        status,
+        body,
+        'Open a new connection with "hebrah connect".'
+      );
     case 429:
-      return new ApiError(message !== `HTTP ${status}` ? message : 'Rate limited', status, body, 'Back off and retry.');
+      return new ApiError(
+        message !== `HTTP ${status}` ? message : 'Rate limited',
+        status,
+        body,
+        'Back off and retry.'
+      );
     case 500:
     case 502:
     case 503:

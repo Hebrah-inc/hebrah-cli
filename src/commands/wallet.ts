@@ -103,7 +103,7 @@ export default async function wallet(
     console.log(`  Auto-reload: ${wallet.auto_reload.enabled ? bold('on') : dim('off')}`);
     if (wallet.auto_reload.enabled) {
       console.log(`    Threshold: $${((wallet.auto_reload.threshold_cents ?? 500) / 100).toFixed(2)}`);
-      console.log(`    Reload: $${(wallet.auto_reload.amount_cents ?? 2000).toFixed(2)}`);
+      console.log(`    Reload: $${((wallet.auto_reload.amount_cents ?? 2000) / 100).toFixed(2)}`);
       console.log(`    Card: ${wallet.auto_reload.stripe_customer_linked ? dim('linked') : warn('not linked (add a payment method via dashboard)')}`);
     }
     console.log(`  30-day burn: ${wallet.burn_30d.queries} queries · $${(wallet.burn_30d.cost_cents / 100).toFixed(2)} · ~$${wallet.burn_30d.avg_cost_per_query_cents.toFixed(4)}/query`);

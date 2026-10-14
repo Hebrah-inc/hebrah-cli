@@ -1,15 +1,38 @@
 // Credentials storage — ~/.hebrah/credentials (mode 0600).
 //
-// Wave 1 stores the hb_conn_* API key + org metadata. Future waves add
-// SSO tokens, relay enrollment tokens, and wallet balance.
+// Security hardening (S-5):
+//   - Rejects symbolic links on ~/.hebrah and ~/.hebrah/credentials via lstatSync.
+//   - Enforces 0700 on directory and 0600 on credentials file.
+//   - Performs atomic writes via temp file + renameSync to prevent corruption or race conditions.
+//   - Stores pinned apiUrl, appUrl, and defaultEnvId for seamless multi-environment CLI usage.
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  unlinkSync,
+  chmodSync,
+  lstatSync,
+  renameSync
+} from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { chmodSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
-const HEBRAH_DIR = join(homedir(), '.hebrah');
-const CREDENTIALS_PATH = join(HEBRAH_DIR, 'credentials');
+export const ALLOWED_KEY_PREFIXES = ['hb_conn_', 'hb_pat_', 'hb_live_', 'hb_test_'] as const;
+
+export function isValidApiKeyFormat(key: string | undefined | null): key is string {
+  if (!key || typeof key !== 'string') return false;
+  const trimmed = key.trim();
+  if (trimmed.length < 12 || /[\s\x00-\x1f\x7f]/.test(trimmed)) return false;
+  return ALLOWED_KEY_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+export function maskApiKey(key: string): string {
+  if (!key || key.length <= 14) return 'hb_***';
+  return `${key.substring(0, 14)}...`;
+}
 
 export interface Credentials {
   apiKey: string;
@@ -17,6 +40,10 @@ export interface Credentials {
   orgName: string;
   keyPrefix: string;
   createdAt: string;
+  apiUrl?: string;
+  appUrl?: string;
+  defaultEnvId?: string;
+  claimUrl?: string;
   mcpEndpointUrl?: string;
   trial?: {
     credits: { queries: number; egressBytes: number };
@@ -24,32 +51,105 @@ export interface Credentials {
   };
 }
 
-export function loadCredentials(): Credentials | null {
-  if (!existsSync(CREDENTIALS_PATH)) return null;
+export function hebrahDir(): string {
+  if (process.env.HEBRAH_CREDENTIALS_DIR) {
+    return process.env.HEBRAH_CREDENTIALS_DIR;
+  }
+  return join(homedir(), '.hebrah');
+}
+
+export function credentialsPath(): string {
+  return join(hebrahDir(), 'credentials');
+}
+
+function assertNotSymlink(targetPath: string): void {
   try {
-    return JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf-8'));
-  } catch {
+    const st = lstatSync(targetPath);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Security error: refusing to access symbolic link at ${targetPath}`);
+    }
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+export function loadCredentials(): Credentials | null {
+  const dir = hebrahDir();
+  const credPath = credentialsPath();
+  assertNotSymlink(dir);
+  assertNotSymlink(credPath);
+
+  if (!existsSync(credPath)) return null;
+  try {
+    const st = lstatSync(credPath);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Security error: refusing to read symbolic link at ${credPath}`);
+    }
+    if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) {
+      try {
+        chmodSync(credPath, 0o600);
+      } catch {
+        // ignore if read-only fs
+      }
+    }
+    return JSON.parse(readFileSync(credPath, 'utf-8'));
+  } catch (err: any) {
+    if (err?.message?.startsWith('Security error:')) {
+      throw err;
+    }
     return null;
   }
 }
 
 export function saveCredentials(creds: Credentials): void {
-  mkdirSync(HEBRAH_DIR, { recursive: true, mode: 0o700 });
-  mkdirSync(dirname(CREDENTIALS_PATH), { recursive: true, mode: 0o700 });
-  writeFileSync(CREDENTIALS_PATH, JSON.stringify(creds, null, 2), { mode: 0o600 });
-  chmodSync(CREDENTIALS_PATH, 0o600);
-}
+  const dir = hebrahDir();
+  const credPath = credentialsPath();
 
-export function clearCredentials(): void {
-  if (existsSync(CREDENTIALS_PATH)) {
-    unlinkSync(CREDENTIALS_PATH);
+  assertNotSymlink(dir);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(dirname(credPath), { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // ignore
+    }
+  }
+
+  assertNotSymlink(credPath);
+
+  const tmpPath = `${credPath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
+  try {
+    writeFileSync(tmpPath, JSON.stringify(creds, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    chmodSync(tmpPath, 0o600);
+    renameSync(tmpPath, credPath);
+    chmodSync(credPath, 0o600);
+  } catch (err) {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup error
+    }
+    throw err;
   }
 }
 
-export function hebrahDir(): string {
-  return HEBRAH_DIR;
+export function updateCredentials(patch: Partial<Credentials>): Credentials | null {
+  const current = loadCredentials();
+  if (!current) return null;
+  const updated: Credentials = {
+    ...current,
+    ...patch
+  };
+  saveCredentials(updated);
+  return updated;
 }
 
-export function credentialsPath(): string {
-  return CREDENTIALS_PATH;
+export function clearCredentials(): void {
+  const credPath = credentialsPath();
+  assertNotSymlink(credPath);
+  if (existsSync(credPath)) {
+    unlinkSync(credPath);
+  }
 }

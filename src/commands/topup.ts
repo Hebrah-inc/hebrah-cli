@@ -21,11 +21,11 @@
 //     NOT through this command. User runs `hebrah usage` after paying to see balance.
 
 import { parseArgs } from 'node:util';
-import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
-import { stdin as input, stdout as output, platform } from 'node:process';
+import { stdin as input, stdout as output } from 'node:process';
 import { api, ApiError, TimeoutError } from '../api/client.js';
 import { loadCredentials } from '../config/credentials.js';
+import { openBrowser } from '../util/browser.js';
 import { json, success, info, warn, error, bold, dim } from '../output/format.js';
 
 interface CheckoutSessionResponse {
@@ -220,40 +220,4 @@ async function interactiveTopup(options: Record<string, unknown>): Promise<numbe
   // Re-enter with --amount flag so the rest of the logic reuses the same path
   const fakeArgv = ['--amount', (preset.usdCents / 100).toFixed(2), '--yes'];
   return topup(fakeArgv, { ...options, _argv: fakeArgv });
-}
-
-async function openBrowser(url: string): Promise<boolean> {
-  // Pick the platform-appropriate opener
-  let cmd: string;
-  let args: string[];
-  if (platform === 'darwin') {
-    cmd = 'open';
-    args = [url];
-  } else if (platform === 'win32') {
-    cmd = 'cmd.exe';
-    args = ['/c', 'start', '""', url];
-  } else {
-    cmd = 'xdg-open';
-    args = [url];
-  }
-
-  return new Promise<boolean>((resolve) => {
-    let child;
-    try {
-      child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
-    } catch {
-      resolve(false);
-      return;
-    }
-    child.on('error', () => resolve(false));
-    child.on('spawn', () => {
-      child.unref();
-      // Give it 500ms to actually open; if it exits immediately, opener missing
-      setTimeout(() => resolve(true), 500);
-    });
-    // If the opener exits cleanly within 500ms, it likely wasn't found
-    child.on('exit', (code: number | null) => {
-      if (code !== null && code !== 0) resolve(false);
-    });
-  });
 }

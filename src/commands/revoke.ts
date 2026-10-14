@@ -13,7 +13,7 @@
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { api } from '../api/client.js';
+import { api, safeId } from '../api/client.js';
 import { success, error, warn } from '../output/format.js';
 
 export default async function revoke(
@@ -72,7 +72,7 @@ export default async function revoke(
       return 1;
     }
 
-    await api.post(`/v1/connections/${connId}/revoke`, {
+    await api.post(`/v1/connections/${safeId(connId, 'connection_id')}/revoke`, {
       reason: values.reason
     });
     success(`Revoked connection ${connId}.`);

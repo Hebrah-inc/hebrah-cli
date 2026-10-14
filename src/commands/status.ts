@@ -1,6 +1,6 @@
 // `hebrah status <conn>` — show connection status.
 
-import { api } from '../api/client.js';
+import { api, safeId } from '../api/client.js';
 import { json, kv, dim, green } from '../output/format.js';
 
 interface ConnectionDetail {
@@ -38,7 +38,7 @@ export default async function status(
   });
 
   try {
-    const detail = await api.get<ConnectionDetail>(`/v1/connections/${connId}`);
+    const detail = await api.get<ConnectionDetail>(`/v1/connections/${safeId(connId, 'connection_id')}`);
 
     if (values.json) {
       json(detail);

@@ -1,7 +1,7 @@
 {
   "name": "@hebrah/cli",
-  "version": "0.3.0",
-  "description": "Hebrah — the data layer for AI agents. Terminal-native CLI.",
+  "version": "0.4.0",
+  "description": "Hebrah — Isolated Health Environments & credential-blind data layer for AI agents. Terminal-native CLI.",
   "bin": {
     "hebrah": "bin/hebrah"
   },
@@ -36,16 +36,14 @@
     "skill.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
-    "prepublishOnly": "pnpm build && pnpm test --run || true"
+    "prepublishOnly": "npm run build && npm test"
   },
-  "dependencies": {
-    "@hebrah/sdk": "^0.8.2"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22",
     "eslint": "^9",

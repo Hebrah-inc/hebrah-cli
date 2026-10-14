@@ -3,19 +3,23 @@
 // Protocol:
 //   1. CLI starts a temporary HTTP server on 127.0.0.1:0 (ephemeral random port).
 //   2. CLI generates a 32-byte cryptographic CSRF `state` nonce.
-//   3. CLI opens browser to app.hebrah.com/cli/authorize?port=<port>&state=<state>&client=cli&host=<hostname>.
+//   3. CLI opens browser to <appUrl>/cli/authorize?port=<port>&state=<state>&client=cli&host=<hostname>.
 //   4. Web app displays consent screen; upon approval redirects to:
-//      http://127.0.0.1:<port>/callback?apiKey=hb_conn_*&state=<state>&orgId=<orgId>&orgName=<orgName>
-//   5. Loopback server validates state nonce, writes credentials, serves HTML, and shuts down.
+//      http://127.0.0.1:<port>/callback?apiKey=hb_conn_*&state=<state>&orgId=<orgId>&orgName=<orgName>&apiUrl=<apiUrl>
+//   5. Loopback server validates state nonce in constant time, scrubs URL history via replaceState,
+//      serves no-store HTML, and shuts down.
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
+import { isValidApiKeyFormat } from '../config/credentials.js';
 
 export interface LoopbackAuthResult {
   apiKey: string;
   orgId: string;
   orgName: string;
+  apiUrl?: string;
+  envId?: string;
 }
 
 export interface LoopbackAuthServer {
@@ -23,6 +27,24 @@ export interface LoopbackAuthServer {
   state: string;
   waitForCallback(timeoutMs?: number): Promise<LoopbackAuthResult>;
   close(): void;
+}
+
+const SECURITY_HEADERS: Record<string, string> = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+  'Pragma': 'no-cache',
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+};
+
+function constantTimeStateMatch(incoming: string | null, expected: string): boolean {
+  if (!incoming || typeof incoming !== 'string') return false;
+  const a = Buffer.from(incoming, 'utf-8');
+  const b = Buffer.from(expected, 'utf-8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function escapeHtml(str: string): string {
@@ -41,7 +63,13 @@ function successHtml(orgName: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>Hebrah CLI — Authorized</title>
+  <script>
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', '/callback');
+    }
+  </script>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -97,7 +125,13 @@ function errorHtml(title: string, message: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>Hebrah CLI — Authorization Failed</title>
+  <script>
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', '/callback');
+    }
+  </script>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -165,20 +199,27 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
     const rawUrl = req.url ?? '/';
     const parsedUrl = new URL(rawUrl, 'http://127.0.0.1');
 
+    // Ignore non-GET probes (HEAD/OPTIONS preflight) so browser prefetchers don't disrupt auth
+    if (req.method && req.method !== 'GET') {
+      res.writeHead(204, SECURITY_HEADERS);
+      res.end();
+      return;
+    }
+
     if (parsedUrl.pathname === '/favicon.ico') {
-      res.writeHead(204);
+      res.writeHead(204, SECURITY_HEADERS);
       res.end();
       return;
     }
 
     if (parsedUrl.pathname !== '/callback') {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.writeHead(404, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Not Found');
       return;
     }
 
     if (settled) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, SECURITY_HEADERS);
       res.end(successHtml('Hebrah'));
       return;
     }
@@ -187,42 +228,56 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
     if (errorParam) {
       settled = true;
       const desc = parsedUrl.searchParams.get('error_description') || errorParam;
-      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(400, SECURITY_HEADERS);
       res.end(errorHtml('Authorization Denied', desc));
       rejectCallback(new Error(`Authorization failed: ${desc}`));
       return;
     }
 
     const incomingState = parsedUrl.searchParams.get('state');
-    if (!incomingState || incomingState !== state) {
+    const rawKey = (parsedUrl.searchParams.get('apiKey') ?? parsedUrl.searchParams.get('key'))?.trim();
+
+    // If a blank probe hits /callback with neither state nor apiKey, return 400 without killing listener
+    if (!incomingState && !rawKey) {
+      res.writeHead(400, SECURITY_HEADERS);
+      res.end(errorHtml('Missing Parameters', 'Awaiting browser authorization callback.'));
+      return;
+    }
+
+    if (!constantTimeStateMatch(incomingState, state)) {
       settled = true;
-      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(400, SECURITY_HEADERS);
       res.end(errorHtml('Invalid State', 'CSRF verification failed. The state parameter did not match.'));
       rejectCallback(new Error('CSRF state verification failed.'));
       return;
     }
 
-    const apiKey = parsedUrl.searchParams.get('apiKey')?.trim();
-    if (!apiKey || !apiKey.startsWith('hb_conn_')) {
+    if (!isValidApiKeyFormat(rawKey)) {
       settled = true;
-      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(errorHtml('Invalid Key', 'No valid agent key (hb_conn_*) was provided.'));
+      res.writeHead(400, SECURITY_HEADERS);
+      res.end(errorHtml('Invalid Key', 'No valid Hebrah key (hb_conn_* or hb_pat_*) was provided.'));
       rejectCallback(new Error('Invalid or missing API key in authorization callback.'));
       return;
     }
 
-    const orgId = parsedUrl.searchParams.get('orgId')?.trim() ?? '';
-    const orgName = parsedUrl.searchParams.get('orgName')?.trim() ?? 'Organization';
+    const orgId = (parsedUrl.searchParams.get('orgId') ?? parsedUrl.searchParams.get('org_id'))?.trim() ?? '';
+    const orgName = (parsedUrl.searchParams.get('orgName') ?? parsedUrl.searchParams.get('org_name'))?.trim() ?? 'Organization';
+    const apiUrl = (parsedUrl.searchParams.get('apiUrl') ?? parsedUrl.searchParams.get('api_url'))?.trim() || undefined;
+    const envId = (parsedUrl.searchParams.get('envId') ?? parsedUrl.searchParams.get('env_id'))?.trim() || undefined;
 
     settled = true;
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, SECURITY_HEADERS);
     res.end(successHtml(orgName));
 
-    resolveCallback({
-      apiKey,
+    const result: LoopbackAuthResult = {
+      apiKey: rawKey,
       orgId,
       orgName
-    });
+    };
+    if (apiUrl) result.apiUrl = apiUrl;
+    if (envId) result.envId = envId;
+
+    resolveCallback(result);
   });
 
   await new Promise<void>((resolve, reject) => {

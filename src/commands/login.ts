@@ -2,18 +2,32 @@
 //
 // Usage:
 //   hebrah login                              (opens browser authorization)
+//   hebrah login --env-id <id>                (opens browser auth & connects agent to clinic environment)
 //   hebrah login --headless                   (RFC 8628 device authorization for remote/SSH)
 //   hebrah login --manual                     (prompts for API key in terminal)
-//   hebrah login --key hb_conn_*              (non-interactive)
+//   hebrah login --key hb_conn_*|hb_pat_*     (non-interactive)
 //   hebrah login --env                        (load from $HEBRAH_API_KEY)
+//   hebrah login --app-url <url> --api-url <url> (explicit staging/custom environment)
 
 import { parseArgs } from 'node:util';
 import { hostname } from 'node:os';
-import { saveCredentials } from '../config/credentials.js';
-import { api, ApiError } from '../api/client.js';
-import { success, error, info, bold, dim, cyan } from '../output/format.js';
+import {
+  saveCredentials,
+  loadCredentials,
+  isValidApiKeyFormat,
+  maskApiKey
+} from '../config/credentials.js';
+import {
+  api,
+  ApiError,
+  inferApiUrlFromAppUrl,
+  safeId,
+  validateApiBaseUrl
+} from '../api/client.js';
+import { success, error, info, bold, dim, cyan, kv } from '../output/format.js';
 import { startLoopbackAuth } from '../util/loopback.js';
 import { openBrowser } from '../util/browser.js';
+import type { EnvironmentDetail } from './env.js';
 
 interface DeviceCodeResponse {
   device_code: string;
@@ -32,13 +46,23 @@ interface DeviceTokenResponse {
   token_type: string;
 }
 
-function getAppUrl(): string {
+function resolveAppUrl(explicitAppUrl?: string, explicitApiUrl?: string): string {
+  if (explicitAppUrl) {
+    return explicitAppUrl.replace(/\/$/, '');
+  }
   if (process.env.HEBRAH_APP_URL) {
     return process.env.HEBRAH_APP_URL.replace(/\/$/, '');
   }
-  const apiUrl = process.env.HEBRAH_API_URL ?? '';
+  const savedAppUrl = loadCredentials()?.appUrl;
+  if (savedAppUrl) {
+    return savedAppUrl.replace(/\/$/, '');
+  }
+  const apiUrl = explicitApiUrl ?? process.env.HEBRAH_API_URL ?? loadCredentials()?.apiUrl ?? '';
   if (apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')) {
     return 'http://localhost:3000';
+  }
+  if (apiUrl.includes('-api-')) {
+    return apiUrl.replace('-api-', '-app-').replace(/\/$/, '');
   }
   return 'https://app.hebrah.com';
 }
@@ -97,7 +121,6 @@ async function loginHeadlessDeviceFlow(timeoutMs: number): Promise<{
           const detail = (err.body as { detail?: { error?: string } })?.detail;
           const errorCode = detail?.error;
           if (errorCode === 'authorization_pending' || err.statusCode === 428) {
-            // Still waiting for user, continue polling
             continue;
           }
           if (errorCode === 'access_denied') {
@@ -129,7 +152,12 @@ export default async function login(
       env: { type: 'boolean', default: false },
       manual: { type: 'boolean', default: false },
       headless: { type: 'boolean', default: false },
-      timeout: { type: 'string' }
+      timeout: { type: 'string' },
+      'app-url': { type: 'string' },
+      'api-url': { type: 'string' },
+      'env-id': { type: 'string' },
+      'agent-name': { type: 'string' },
+      json: { type: 'boolean', default: false }
     },
     allowPositionals: false
   });
@@ -139,13 +167,39 @@ export default async function login(
   let orgIdFromAuth: string | undefined;
   const timeoutMs = values.timeout ? parseInt(values.timeout as string, 10) : 120_000;
 
+  const flagAppUrl = values['app-url'] as string | undefined;
+  let flagApiUrl = values['api-url'] as string | undefined;
+  let targetEnvId = (values['env-id'] as string | undefined) ?? process.env.HEBRAH_ENV_ID;
+  const agentName = (values['agent-name'] as string | undefined) || `cli-agent-${hostname()}`;
+
+  if (!flagApiUrl && flagAppUrl) {
+    flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
+  }
+  const appUrl = resolveAppUrl(flagAppUrl, flagApiUrl);
+  if (!flagApiUrl && appUrl) {
+    const inferred = inferApiUrlFromAppUrl(appUrl);
+    if (inferred && !process.env.HEBRAH_API_URL) {
+      flagApiUrl = inferred;
+    }
+  }
+
+  if (flagApiUrl) {
+    try {
+      flagApiUrl = validateApiBaseUrl(flagApiUrl);
+      api.setBaseUrl(flagApiUrl);
+    } catch (err) {
+      error((err as Error).message);
+      return 1;
+    }
+  }
+
   // 1. Direct --key flag
   if (apiKey) {
-    // handled below
+    apiKey = apiKey.trim();
   }
   // 2. Direct --env flag
   else if (values.env) {
-    apiKey = process.env.HEBRAH_API_KEY;
+    apiKey = process.env.HEBRAH_API_KEY?.trim();
     if (!apiKey) {
       error('HEBRAH_API_KEY environment variable is not set.');
       return 1;
@@ -155,7 +209,7 @@ export default async function login(
   else if (values.manual && process.stdin.isTTY) {
     const { createInterface } = await import('node:readline/promises');
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    apiKey = await rl.question('API key (hb_conn_*): ');
+    apiKey = (await rl.question('API key (hb_conn_* or hb_pat_*): ')).trim();
     rl.close();
   }
   // 4. Remote --headless Device Authorization (RFC 8628)
@@ -173,7 +227,6 @@ export default async function login(
   }
   // 5. Default: Local Desktop Browser Loopback Authorization
   else {
-    const appUrl = getAppUrl();
     const clientHost = hostname();
 
     let loopback;
@@ -185,7 +238,17 @@ export default async function login(
       return 1;
     }
 
-    const authUrl = `${appUrl}/cli/authorize?port=${loopback.port}&state=${loopback.state}&client=cli&host=${encodeURIComponent(clientHost)}`;
+    const queryParams = new URLSearchParams({
+      port: String(loopback.port),
+      state: loopback.state,
+      client: 'cli',
+      host: clientHost
+    });
+    if (targetEnvId) {
+      queryParams.set('env_id', targetEnvId);
+    }
+
+    const authUrl = `${appUrl}/cli/authorize?${queryParams.toString()}`;
 
     console.log();
     info('Opening your browser to authorize Hebrah CLI:');
@@ -193,7 +256,6 @@ export default async function login(
     console.log();
     console.log(dim('Waiting for browser authorization (press Ctrl+C to cancel)...'));
 
-    // Handle Ctrl+C gracefully
     const onSigint = () => {
       loopback.close();
       console.log('\nLogin cancelled.');
@@ -212,6 +274,17 @@ export default async function login(
       apiKey = result.apiKey;
       orgIdFromAuth = result.orgId;
       orgNameFromAuth = result.orgName;
+      if (result.apiUrl) {
+        try {
+          flagApiUrl = validateApiBaseUrl(result.apiUrl);
+          api.setBaseUrl(flagApiUrl);
+        } catch {
+          // ignore invalid callback apiUrl; keep validated base URL
+        }
+      }
+      if (result.envId && !targetEnvId) {
+        targetEnvId = result.envId;
+      }
     } catch (err) {
       error((err as Error).message);
       info('Run `hebrah login` to try again, or `hebrah login --headless` for device flow.');
@@ -221,30 +294,118 @@ export default async function login(
     }
   }
 
-  if (!apiKey || !apiKey.startsWith('hb_conn_')) {
-    error('API key must start with hb_conn_.');
+  if (!apiKey || !isValidApiKeyFormat(apiKey)) {
+    error('API key must start with hb_conn_, hb_pat_, hb_live_, or hb_test_ (minimum 16 characters).');
     return 1;
   }
 
   api.setApiKey(apiKey);
+  const resolvedApiUrl = api.getBaseUrl();
 
-  // Verify key against the agent API
+  // Verify key against the agent API (with fallback to /v1/environments for scoped tokens)
   try {
-    const usage = await api.get<{ orgId: string; tier: string }>('/v1/agent/account/usage');
+    let resolvedOrgId = orgIdFromAuth || '';
+    let resolvedOrgName = orgNameFromAuth || '';
+    let resolvedTier = 'active';
+
+    try {
+      const usage = await api.get<{ orgId: string; orgName?: string; tier: string }>(
+        '/v1/agent/account/usage'
+      );
+      resolvedOrgId = resolvedOrgId || usage.orgId;
+      resolvedOrgName = resolvedOrgName || usage.orgName || '(workspace)';
+      resolvedTier = usage.tier || 'active';
+    } catch (usageErr) {
+      // Fallback: verify token via /v1/environments
+      const envsRes = await api.get<Array<{ org_id: string }> | { environments: Array<{ org_id: string }> }>(
+        '/v1/environments'
+      );
+      const envList = Array.isArray(envsRes) ? envsRes : (envsRes.environments ?? []);
+      if (envList.length > 0 && envList[0].org_id) {
+        resolvedOrgId = resolvedOrgId || envList[0].org_id;
+      }
+      if (!resolvedOrgId) {
+        resolvedOrgId = 'org-verified';
+      }
+      resolvedOrgName = resolvedOrgName || '(workspace)';
+      void usageErr;
+    }
 
     saveCredentials({
       apiKey,
-      orgId: orgIdFromAuth || usage.orgId,
-      orgName: orgNameFromAuth || '(workspace)',
-      keyPrefix: apiKey.substring(0, 14) + '...',
-      createdAt: new Date().toISOString()
+      orgId: resolvedOrgId,
+      orgName: resolvedOrgName,
+      keyPrefix: maskApiKey(apiKey),
+      createdAt: new Date().toISOString(),
+      apiUrl: resolvedApiUrl,
+      appUrl,
+      defaultEnvId: targetEnvId
     });
 
+    let connectedEnv: EnvironmentDetail | null = null;
+    if (targetEnvId) {
+      try {
+        connectedEnv = await api.post<EnvironmentDetail>(
+          `/v1/environments/${safeId(targetEnvId, 'environment_id')}/agents/connect`,
+          {
+            agent_name: agentName,
+            client: 'hebrah-cli'
+          }
+        );
+      } catch {
+        // Fallback to GET /v1/environments/{id} if server doesn't have /agents/connect yet
+        try {
+          connectedEnv = await api.get<EnvironmentDetail>(
+            `/v1/environments/${safeId(targetEnvId, 'environment_id')}`
+          );
+        } catch (envErr) {
+          info(`Note: Could not auto-attach to environment ${targetEnvId}: ${(envErr as Error).message}`);
+        }
+      }
+    }
+
+    if (values.json) {
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            orgId: resolvedOrgId,
+            orgName: resolvedOrgName,
+            keyPrefix: maskApiKey(apiKey),
+            apiUrl: resolvedApiUrl,
+            appUrl,
+            defaultEnvId: targetEnvId ?? null,
+            environment: connectedEnv
+          },
+          null,
+          2
+        )
+      );
+      return 0;
+    }
+
     console.log();
-    success(`Logged in${orgNameFromAuth ? ` to ${orgNameFromAuth}` : ''}.`);
-    info(`Org ID: ${orgIdFromAuth || usage.orgId}`);
-    info(`Tier:   ${usage.tier}`);
+    success(`Logged in${resolvedOrgName ? ` to ${resolvedOrgName}` : ''}.`);
+    info(`Org ID:       ${resolvedOrgId}`);
+    info(`Tier:         ${resolvedTier}`);
+    info(`API Endpoint: ${resolvedApiUrl}`);
     info('Credentials saved to ~/.hebrah/credentials (mode 0600).');
+
+    if (connectedEnv) {
+      console.log();
+      success(`Connected agent "${agentName}" to clinic environment: ${bold(connectedEnv.name)} (${connectedEnv.id})`);
+      kv([
+        ['Environment ID', connectedEnv.id],
+        ['Clinic Type', connectedEnv.clinic_type],
+        ['Status', connectedEnv.status],
+        ['Attached DBs', (connectedEnv.addons ?? []).join(', ') || 'none'],
+        ['FHIR R4 Endpoint', connectedEnv.endpoints?.fhir ?? 'n/a'],
+        ['HL7 v2 Stream', connectedEnv.endpoints?.hl7_ws ?? 'n/a']
+      ]);
+      console.log();
+      info(`Default environment set to ${connectedEnv.id}. Run \`hebrah env status\` or \`hebrah env query "SELECT * FROM patients LIMIT 5"\`.`);
+    }
+
     return 0;
   } catch (err) {
     if (err instanceof ApiError) {

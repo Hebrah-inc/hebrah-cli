@@ -8,6 +8,8 @@ describe('hebrah env command', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    process.env.HEBRAH_CREDENTIALS_DIR = '/tmp/hebrah-cli-empty-env-test';
+    delete process.env.HEBRAH_ENV_ID;
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });

@@ -7,7 +7,7 @@
 
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
-import { api } from '../api/client.js';
+import { api, safeId } from '../api/client.js';
 import { json, table, dim, green, yellow } from '../output/format.js';
 
 interface QueryResponse {
@@ -58,7 +58,7 @@ export default async function query(
   const maxRows = values['max-rows'] ? parseInt(values['max-rows'] as string, 10) : undefined;
 
   try {
-    const result = await api.post<QueryResponse>(`/v1/connections/${connId}/query`, {
+    const result = await api.post<QueryResponse>(`/v1/connections/${safeId(connId, 'connection_id')}/query`, {
       sql,
       maxRows
     });

@@ -6,8 +6,7 @@
 //   hebrah audit export <conn>                 (export as JSON)
 
 import { parseArgs } from 'node:util';
-import { writeFileSync } from 'node:fs';
-import { api } from '../api/client.js';
+import { api, safeId } from '../api/client.js';
 import { json, table, dim, green, red, yellow } from '../output/format.js';
 
 interface AuditEvent {
@@ -76,7 +75,10 @@ async function auditShow(connId: string, options: Record<string, unknown>): Prom
   if (values.event) params.event_type = values.event as string;
 
   try {
-    const events = await api.get<AuditEvent[]>(`/v1/connections/${connId}/audit`, params);
+    const events = await api.get<AuditEvent[]>(
+      `/v1/connections/${safeId(connId, 'connection_id')}/audit`,
+      params
+    );
 
     if (values.json) {
       json(events);
@@ -106,7 +108,10 @@ async function auditShow(connId: string, options: Record<string, unknown>): Prom
 
 async function auditVerify(connId: string, _options: Record<string, unknown>): Promise<number> {
   try {
-    const result = await api.get<VerifyResponse>(`/v1/audit/verify?connection_id=${connId}`);
+    const safeConnId = safeId(connId, 'connection_id');
+    const result = await api.get<VerifyResponse>('/v1/audit/verify', {
+      connection_id: safeConnId
+    });
 
     if (result.verified) {
       console.log(green(`✓ Hash chain verified: ${result.eventsChecked} events, genesis ${result.genesisHash.substring(0, 16)}...`));
@@ -125,7 +130,10 @@ async function auditVerify(connId: string, _options: Record<string, unknown>): P
 
 async function auditExport(connId: string, _options: Record<string, unknown>): Promise<number> {
   try {
-    const events = await api.get<AuditEvent[]>(`/v1/connections/${connId}/audit?limit=10000`);
+    const events = await api.get<AuditEvent[]>(
+      `/v1/connections/${safeId(connId, 'connection_id')}/audit`,
+      { limit: '10000' }
+    );
 
     const exported = {
       connectionId: connId,
