@@ -22,6 +22,34 @@ function colorize(s: string, color: keyof typeof COLORS): string {
   return `${COLORS[color]}${s}${COLORS.reset}`;
 }
 
+// Strip dangerous terminal escape sequences (OSC 52 clipboard hijack, OSC 8 hyperlinks,
+// cursor repositioning, window title injection) and raw control characters from untrusted data.
+const OSC_OR_DCS_RE = /\x1b(?:\][\s\S]*?(?:\x07|\x1b\\)|[PX^_][\s\S]*?\x1b\\)/g;
+const CSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const RAW_CTRL_RE = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+export function sanitizeTerminalText(raw: string): string {
+  return String(raw)
+    .replace(OSC_OR_DCS_RE, '')
+    .replace(CSI_RE, '')
+    .replace(RAW_CTRL_RE, '');
+}
+
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_HEBRAH_TOKEN]'],
+  [/\benc:v1:[A-Za-z0-9+/=_:-]+/g, 'enc:v1:[REDACTED]'],
+  [/(PrivateKey\s*=\s*)[^\r\n]+/gi, '$1[REDACTED]'],
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]']
+];
+
+export function redactSecrets(raw: string): string {
+  let out = String(raw);
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 export function dim(s: string): string { return colorize(s, 'dim'); }
 export function bold(s: string): string { return colorize(s, 'bold'); }
 export function green(s: string): string { return colorize(s, 'green'); }
@@ -40,47 +68,51 @@ export function table(headers: string[], rows: string[][]): void {
     console.log(dim('(no rows)'));
     return;
   }
+  const safeHeaders = headers.map((h) => sanitizeTerminalText(h));
+  const safeRows = rows.map((r) => r.map((cell) => sanitizeTerminalText(cell ?? '')));
   // Calculate column widths
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length))
+  const widths = safeHeaders.map((h, i) =>
+    Math.max(h.length, ...safeRows.map((r) => (r[i] ?? '').length))
   );
 
   // Header
-  const headerLine = headers.map((h, i) => bold(h.padEnd(widths[i]))).join('  ');
+  const headerLine = safeHeaders.map((h, i) => bold(h.padEnd(widths[i]))).join('  ');
   console.log(headerLine);
 
   // Separator
   console.log(dim(widths.map((w) => '─'.repeat(w)).join('  ')));
 
   // Rows
-  for (const row of rows) {
+  for (const row of safeRows) {
     const line = row.map((cell, i) => (cell ?? '').padEnd(widths[i])).join('  ');
     console.log(line);
   }
 }
 
 export function kv(pairs: Array<[string, string]>, labelColor: keyof typeof COLORS = 'cyan'): void {
-  const maxLabel = Math.max(...pairs.map(([k]) => k.length));
+  const maxLabel = Math.max(...pairs.map(([k]) => sanitizeTerminalText(k).length));
   for (const [key, value] of pairs) {
-    const paddedKey = key.padEnd(maxLabel);
-    console.log(`${colorize(paddedKey, labelColor)}  ${value}`);
+    const paddedKey = sanitizeTerminalText(key).padEnd(maxLabel);
+    // Preserve intentional SGR color sequences emitted by CLI commands while stripping OSC/control chars
+    const safeVal = String(value).replace(OSC_OR_DCS_RE, '').replace(RAW_CTRL_RE, '');
+    console.log(`${colorize(paddedKey, labelColor)}  ${safeVal}`);
   }
 }
 
 export function success(message: string): void {
-  console.log(`${green('✓')} ${message}`);
+  console.log(`${green('✓')} ${sanitizeTerminalText(message)}`);
 }
 
 export function warn(message: string): void {
-  console.error(`${yellow('!')} ${message}`);
+  console.error(`${yellow('!')} ${redactSecrets(sanitizeTerminalText(message))}`);
 }
 
 export function error(message: string): void {
-  console.error(`${red('✗')} ${message}`);
+  console.error(`${red('✗')} ${redactSecrets(sanitizeTerminalText(message))}`);
 }
 
 export function info(message: string): void {
-  console.log(`${blue('ℹ')} ${message}`);
+  console.log(`${blue('ℹ')} ${sanitizeTerminalText(message)}`);
 }
 
 export function formatBytes(bytes: number): string {

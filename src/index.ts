@@ -9,6 +9,7 @@ import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { redactSecrets, sanitizeTerminalText } from './output/format.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_VERSION = JSON.parse(
@@ -79,7 +80,7 @@ async function main(): Promise<number> {
 
   const descriptor = COMMANDS[cmd];
   if (!descriptor) {
-    console.error(`hebrah: unknown command "${cmd}"`);
+    console.error(`hebrah: unknown command "${redactSecrets(sanitizeTerminalText(String(cmd)))}"`);
     console.error(`Run "hebrah help" for usage.`);
     return 1;
   }
@@ -95,11 +96,11 @@ async function main(): Promise<number> {
     return await result.default(positionals.slice(1), { _command: cmd, debug, _argv: cmdArgv });
   } catch (err: any) {
     if (debug) {
-      console.error(err.stack);
+      console.error(redactSecrets(sanitizeTerminalText(String(err.stack ?? err.message ?? err))));
     } else {
-      console.error(`hebrah: ${err.message ?? 'unknown error'}`);
+      console.error(`hebrah: ${redactSecrets(sanitizeTerminalText(String(err.message ?? 'unknown error')))}`);
       if (err.suggestion) {
-        console.error(`Hint: ${err.suggestion}`);
+        console.error(`Hint: ${redactSecrets(sanitizeTerminalText(String(err.suggestion)))}`);
       }
     }
     return 4;

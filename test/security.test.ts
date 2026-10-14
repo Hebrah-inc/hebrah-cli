@@ -428,4 +428,26 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       );
     });
   });
+
+  describe('S-7: Terminal Escape Injection (OSC 52/OSC 8) & Error Secret Redaction', () => {
+    it('strips OSC 52 clipboard hijack, OSC 8 links, and control chars while redacting tokens', async () => {
+      const { sanitizeTerminalText, redactSecrets } = await import('../src/output/format.js');
+      const malicious =
+        'Patient Name \x1b]52;c;ZWNobyBoYWNrZWQ=\x07 \x1b]8;;https://evil.com\x07Click\x1b]8;;\x07 \x1b[2J';
+      const cleaned = sanitizeTerminalText(malicious);
+      expect(cleaned).not.toContain('\x1b]52');
+      expect(cleaned).not.toContain('\x1b]8');
+      expect(cleaned).not.toContain('\x1b[2J');
+      expect(cleaned).toContain('Patient Name');
+
+      const leaked =
+        'Error: key=hb_live_1234567890abcdef and vault=enc:v1:999999999999 and PrivateKey = SECRET_WG_KEY';
+      const redacted = redactSecrets(leaked);
+      expect(redacted).not.toContain('hb_live_1234567890abcdef');
+      expect(redacted).not.toContain('enc:v1:999999999999');
+      expect(redacted).not.toContain('SECRET_WG_KEY');
+      expect(redacted).toContain('[REDACTED_HEBRAH_TOKEN]');
+    });
+  });
 });
+

@@ -840,9 +840,11 @@ async function wireguardEnv(
         // Ignore on platforms that don't support POSIX modes
       }
       if (values.json) {
+        const safeConfig = revealKey ? configText : redactWireguardPrivateKey(configText);
         json({
           ...wg,
-          config_text: revealKey ? configText : redactWireguardPrivateKey(configText),
+          ...(('config' in (wg as any)) ? { config: safeConfig } : {}),
+          config_text: safeConfig,
           saved_to: outPath,
           mode: '0600'
         });
@@ -856,9 +858,11 @@ async function wireguardEnv(
     }
 
     if (values.json) {
+      const safeConfig = revealKey ? configText : redactWireguardPrivateKey(configText);
       json({
         ...wg,
-        config_text: revealKey ? configText : redactWireguardPrivateKey(configText)
+        ...(('config' in (wg as any)) ? { config: safeConfig } : {}),
+        config_text: safeConfig
       });
       return 0;
     }

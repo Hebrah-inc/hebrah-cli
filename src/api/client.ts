@@ -309,6 +309,12 @@ function mapError(status: number, body: unknown): ApiError {
     }
   }
 
+  message = message
+    .replace(/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_HEBRAH_TOKEN]')
+    .replace(/\benc:v1:[A-Za-z0-9+/=_:-]+/g, 'enc:v1:[REDACTED]')
+    .replace(/(PrivateKey\s*=\s*)[^\r\n]+/gi, '$1[REDACTED]')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+
   const suggestion = (body as any)?.suggestion;
 
   switch (status) {
