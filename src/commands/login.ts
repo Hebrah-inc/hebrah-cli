@@ -11,6 +11,7 @@
 
 import { parseArgs } from 'node:util';
 import { hostname } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import {
   saveCredentials,
   loadCredentials,
@@ -25,7 +26,7 @@ import {
   validateApiBaseUrl
 } from '../api/client.js';
 import { success, error, info, bold, dim, cyan, kv } from '../output/format.js';
-import { startLoopbackAuth } from '../util/loopback.js';
+import { startLoopbackAuth, type LoopbackAuthResult, type LoopbackAuthServer } from '../util/loopback.js';
 import { openBrowser } from '../util/browser.js';
 import type { EnvironmentDetail } from './env.js';
 
@@ -43,7 +44,49 @@ interface DeviceTokenResponse {
   keyPrefix: string;
   orgId: string;
   orgName: string;
+  envId?: string | null;
   token_type: string;
+}
+
+async function pollStateTokenFromCloud(
+  stateNonce: string,
+  timeoutMs: number,
+  isCancelled: () => boolean
+): Promise<LoopbackAuthResult> {
+  const deadline = Date.now() + timeoutMs;
+  const pollIntervalMs = 2000;
+
+  while (Date.now() < deadline && !isCancelled()) {
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    if (isCancelled()) break;
+
+    try {
+      const tokenResp = await api.post<DeviceTokenResponse>('/v1/auth/device/token', {
+        device_code: stateNonce
+      });
+      if (tokenResp && tokenResp.apiKey) {
+        return {
+          apiKey: tokenResp.apiKey,
+          orgId: tokenResp.orgId,
+          orgName: tokenResp.orgName,
+          envId: tokenResp.envId ?? undefined
+        };
+      }
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const detail = (err.body as { detail?: { error?: string } })?.detail;
+        const errorCode = detail?.error;
+        if (errorCode === 'authorization_pending' || err.statusCode === 428) {
+          continue;
+        }
+        if (errorCode === 'access_denied') {
+          throw new Error('Authorization was denied by the user.');
+        }
+      }
+      // Keep polling until deadline on transient network/400 errors before user clicks Authorize
+    }
+  }
+  throw new Error(`Login timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
 }
 
 function resolveAppUrl(explicitAppUrl?: string, explicitApiUrl?: string): string {
@@ -165,7 +208,7 @@ export default async function login(
   let apiKey = values.key as string | undefined;
   let orgNameFromAuth: string | undefined;
   let orgIdFromAuth: string | undefined;
-  const timeoutMs = values.timeout ? parseInt(values.timeout as string, 10) : 120_000;
+  const timeoutMs = values.timeout ? parseInt(values.timeout as string, 10) : 600_000;
 
   const flagAppUrl = values['app-url'] as string | undefined;
   let flagApiUrl = values['api-url'] as string | undefined;
@@ -225,25 +268,29 @@ export default async function login(
       return 1;
     }
   }
-  // 5. Default: Local Desktop Browser Loopback Authorization
+  // 5. Default: Browser Authorization (Cloud-Polled + Optional Loopback — Zero Localhost Redirect)
   else {
     const clientHost = hostname();
 
-    let loopback;
+    let loopback: LoopbackAuthServer | null = null;
     try {
       loopback = await startLoopbackAuth();
-    } catch (err) {
-      error(`Failed to start local authorization listener: ${(err as Error).message}`);
-      info('You can log in using `hebrah login --headless` or `hebrah login --manual` instead.');
-      return 1;
+    } catch {
+      // Loopback port binding is optional (e.g. inside sandboxed agent containers);
+      // cloud polling by `state` handles token retrieval seamlessly.
+      loopback = null;
     }
 
+    const stateNonce = loopback ? loopback.state : randomBytes(32).toString('hex');
+
     const queryParams = new URLSearchParams({
-      port: String(loopback.port),
-      state: loopback.state,
+      state: stateNonce,
       client: 'cli',
       host: clientHost
     });
+    if (loopback) {
+      queryParams.set('port', String(loopback.port));
+    }
     if (targetEnvId) {
       queryParams.set('env_id', targetEnvId);
     }
@@ -256,8 +303,10 @@ export default async function login(
     console.log();
     console.log(dim('Waiting for browser authorization (press Ctrl+C to cancel)...'));
 
+    let cancelled = false;
     const onSigint = () => {
-      loopback.close();
+      cancelled = true;
+      loopback?.close();
       console.log('\nLogin cancelled.');
       process.exit(130);
     };
@@ -266,11 +315,20 @@ export default async function login(
     const opened = await openBrowser(authUrl);
     if (!opened) {
       info('Could not automatically launch browser.');
-      info('Open the link above manually, or run `hebrah login --headless` for remote device flow.');
+      info('Open the link above manually to click "Authorize CLI".');
     }
 
     try {
-      const result = await loopback.waitForCallback(timeoutMs);
+      const waiters: Array<Promise<LoopbackAuthResult>> = [
+        pollStateTokenFromCloud(stateNonce, timeoutMs, () => cancelled)
+      ];
+      if (loopback) {
+        waiters.push(loopback.waitForCallback(timeoutMs));
+      }
+      const result = await Promise.any(waiters);
+      cancelled = true;
+      loopback?.close();
+
       apiKey = result.apiKey;
       orgIdFromAuth = result.orgId;
       orgNameFromAuth = result.orgName;
@@ -286,8 +344,13 @@ export default async function login(
         targetEnvId = result.envId;
       }
     } catch (err) {
-      error((err as Error).message);
-      info('Run `hebrah login` to try again, or `hebrah login --headless` for device flow.');
+      cancelled = true;
+      loopback?.close();
+      const msg = err instanceof AggregateError && err.errors.length > 0
+        ? (err.errors[0] as Error).message
+        : (err as Error).message;
+      error(msg);
+      info('Run `hebrah login` to try again, or copy the `npx @hebrah/cli login --key ...` command shown on the web page.');
       return 1;
     } finally {
       process.removeListener('SIGINT', onSigint);

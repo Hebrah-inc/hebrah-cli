@@ -431,7 +431,7 @@ async function connectEnv(
     try {
       detail = await api.post<EnvironmentDetail>(`/v1/environments/${cleanId}/agents/connect`, {
         agent_name: agentName,
-        cli_version: '0.4.0',
+        cli_version: '0.4.1',
         platform: `${platform()}-${hostname()}`
       });
     } catch {

@@ -18,9 +18,9 @@ function loadPackageVersion(): string {
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
-    return pkg.version || '0.4.0';
+    return pkg.version || '0.4.1';
   } catch {
-    return '0.4.0';
+    return '0.4.1';
   }
 }
 
@@ -88,7 +88,7 @@ function isTrustedHebrahHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (LOOPBACK_HOSTS.has(host)) return true;
   if (host === 'hebrah.com' || host.endsWith('.hebrah.com')) return true;
-  if (/^hebrah-[a-z0-9-]+-[a-z0-9]+-[a-z0-9]+\.a\.run\.app$/.test(host)) return true;
+  if (/^hebrah-[a-z0-9-]+(?:\.[a-z0-9-]+)?\.run\.app$/.test(host)) return true;
   if (process.env.HEBRAH_ALLOW_CUSTOM_HOST === '1') return true;
   return false;
 }
