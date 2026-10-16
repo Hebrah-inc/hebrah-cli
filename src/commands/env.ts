@@ -41,6 +41,7 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { api, safeId } from '../api/client.js';
 import { loadCredentials, updateCredentials } from '../config/credentials.js';
+import { normalizeWireguardConfig } from './db.js';
 import {
   success,
   info,
@@ -823,7 +824,9 @@ async function wireguardEnv(
       `/v1/environments/${safeId(envId, 'environment_id')}/wireguard/config`
     );
 
-    const configText = wg.config_text || (wg as any).config || '';
+    const configText = normalizeWireguardConfig(
+      wg.config_text || (wg as any).config || ''
+    );
     const outPath = typeof values.out === 'string' ? values.out : undefined;
 
     if (outPath) {
@@ -967,23 +970,25 @@ async function dbProxyEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+  const nonFlags = argv.filter((a) => !a.startsWith('-'));
+  const rawEnvId = nonFlags[0];
+  const rawPositionalPort = nonFlags[1];
 
   const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+    args: argv.filter((a) => a !== rawEnvId && a !== rawPositionalPort),
     options: {
-      port: { type: 'string', default: '5432' },
+      port: { type: 'string' },
       addon: { type: 'string', default: 'postgres' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env db-proxy: environment_id required');
-    console.error('Usage: hebrah env db-proxy <environment_id> [--port 5432] [--addon postgres] [--json]');
+    console.error('Usage: hebrah env db-proxy <environment_id> [port] [--port 5432] [--addon postgres] [--json]');
     return 1;
   }
 
@@ -991,18 +996,21 @@ async function dbProxyEnv(
     const detail = await api.get<EnvironmentDetail>(`/v1/environments/${safeId(envId, 'environment_id')}`);
 
     const wgIp = detail.wireguard_ip ?? '10.42.0.1';
-    const port = typeof values.port === 'string' ? (parseInt(values.port, 10) || 5432) : 5432;
+    const portStr = typeof values.port === 'string' ? values.port : (rawPositionalPort ?? '5432');
+    const port = parseInt(portStr, 10) || 5432;
     const addon = typeof values.addon === 'string' ? values.addon : 'postgres';
 
     const infoData = {
       environment_id: detail.id,
       host: wgIp,
+      local_proxy_host: '127.0.0.1',
       port,
       database: 'clinic_ehr',
       user: 'postgres',
       ssl_mode: 'prefer',
       addon,
-      connection_string: `postgresql://postgres@${wgIp}:${port}/clinic_ehr`
+      connection_string: `postgresql://postgres@${wgIp}:${port}/clinic_ehr`,
+      local_proxy_command: `hebrah db proxy ${detail.id} ${port}`
     };
 
     if (values.json) {
@@ -1013,6 +1021,7 @@ async function dbProxyEnv(
     console.log(bold(`Developer Database GUI Coordinates — ${detail.name} (${detail.id})`));
     console.log();
     kv([
+      ['Host (Local Proxy)', `127.0.0.1 (via "hebrah db proxy ${detail.id} ${port}")`],
       ['Host (WireGuard)', wgIp],
       ['Port', String(port)],
       ['Database', 'clinic_ehr'],
@@ -1021,11 +1030,10 @@ async function dbProxyEnv(
       ['Connection URL', infoData.connection_string]
     ]);
     console.log();
-    info('Instructions for DBeaver / TablePlus:');
-    console.log(dim('  1. Run "hebrah env wireguard ' + detail.id + ' --out ./wg.conf" to download VPN config'));
-    console.log(dim('  2. Activate WireGuard connection'));
-    console.log(dim(`  3. Point DBeaver or TablePlus to host ${wgIp}:${port}`));
-    console.log(dim('  4. AI agents continue accessing data credential-blind via "hebrah env query ' + detail.id + ' <sql>"'));
+    info('Instructions for DBeaver / TablePlus / DataGrip:');
+    console.log(dim(`  Option A (Instant Local Tunnel): Run "hebrah db proxy ${detail.id} ${port}" and connect to 127.0.0.1:${port}`));
+    console.log(dim(`  Option B (WireGuard Mesh): Run "hebrah db wireguard ${detail.id} --out ./hb-env.conf" and connect to ${wgIp}:${port}`));
+    console.log(dim(`  AI Agents: Continue accessing data credential-blind via "hebrah db query ${detail.id} <sql>"`));
 
     return 0;
   } catch (err) {

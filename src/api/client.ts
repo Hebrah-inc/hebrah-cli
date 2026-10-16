@@ -196,6 +196,14 @@ class HebrahApi {
     // Origin Pinning (Finding S-2): ensure saved credentials are only sent to their pinned API origin
     const pinnedOrigin = creds.apiUrl ? validateApiBaseUrl(creds.apiUrl) : DEFAULT_PROD_API_URL;
     if (targetOrigin !== pinnedOrigin) {
+      try {
+        const targetHost = new URL(targetOrigin).hostname.toLowerCase();
+        if (LOOPBACK_HOSTS.has(targetHost)) {
+          return null;
+        }
+      } catch {
+        // fall through to throw
+      }
       throw new Error(
         `Security error: stored credentials are pinned to ${pinnedOrigin}, refusing to send token to ${targetOrigin}. Run "hebrah login --api-url ${targetOrigin}" or set HEBRAH_API_KEY.`
       );
