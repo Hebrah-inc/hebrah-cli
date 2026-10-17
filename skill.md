@@ -1,14 +1,14 @@
 ---
 name: hebrah
-version: 0.4.0
-description: Isolated Health Environments & credential-blind clinical data connections for AI agents. Use Hebrah when the task requires connecting to a clinic environment (FHIR R4, HL7 v2 WebSocket, X12 EDI, Postgres, SQLite, Qdrant, Neo4j) or scoped private data without receiving raw database credentials.
+version: 0.4.2
+description: Isolated Health Environments & credential-blind clinical data connections for AI agents. Use Hebrah when the task requires connecting to a clinic environment (FHIR R4, HL7 v2 WebSocket, DICOMweb PACS, X12 EDI, Postgres, SQLite, Qdrant, Neo4j), consulting the isolated Environment AI Studio, or querying Open-Data Clinical & Imaging Enrichment Packs without receiving raw database credentials.
 ---
 
 # Hebrah — Isolated Health Environments for AI Agents
 
 ## 3-Step Agent Onboarding (90 seconds)
 
-### Step 1 — Install or Upgrade `@hebrah/cli` (v0.4.0+)
+### Step 1 — Install or Upgrade `@hebrah/cli` (v0.4.2+)
 
 ```bash
 npm install -g @hebrah/cli@latest
@@ -64,20 +64,26 @@ Once authenticated, bind and verify the target clinic environment:
 # 1. Connect to the target clinic environment (sets defaultEnvId in ~/.hebrah/credentials & logs agent.connected)
 hebrah env connect <ENV_ID>
 
-# 2. Inspect environment status, FHIR/HL7/EDI endpoints, and attached Database Modules
+# 2. Inspect environment status, FHIR/HL7/DICOM/EDI endpoints, and attached Database Modules
 hebrah env info <ENV_ID>
 
-# 3. Run credential-blind SQL queries against the environment's PostgreSQL / SQLite schema
+# 3. Consult the isolated Per-Environment GCP AI Studio (with 3-layer anti-skill lock & provenance citations)
+hebrah env studio <ENV_ID> "Join our patients with PubMed RCT PICO evidence and show CDS Hooks 2.0 cards"
+
+# 4. Inspect or search the Open-Data Clinical Knowledge & DICOM Imaging Enrichment Packs
+hebrah env open-data <ENV_ID> --search "sepsis"
+
+# 5. Run credential-blind SQL queries against the environment's PostgreSQL / SQLite schema
 hebrah env query <ENV_ID> --sql "SELECT id, mrn, first_name, last_name, dob, gender, status FROM patients LIMIT 10"
 
-# 4. Trigger a synthetic clinical scenario (e.g. admit_patient, lab_result_critical, vital_alert, med_order, discharge)
+# 6. Trigger a synthetic clinical scenario (e.g. admit_patient, lab_result_critical, vital_alert, med_order, discharge)
 hebrah env trigger <ENV_ID> --scenario vital_alert
 
-# 5. Stream live environment activity logs
+# 7. Stream live environment activity logs
 hebrah env logs <ENV_ID>
 ```
 
-## CLI Command Summary (`@hebrah/cli` v0.4.0)
+## CLI Command Summary (`@hebrah/cli` v0.4.2)
 
 ```bash
 hebrah login [--app-url <url>] [--api-url <url>] [--env-id <id>] [--key <token>] [--headless]
@@ -85,8 +91,14 @@ hebrah signup --name <org> --email <work-email> [--app-url <url>] [--api-url <ur
 hebrah whoami                          # Show authenticated org, API endpoint, default environment, and wallet balance
 hebrah env list                        # List isolated health environments
 hebrah env create --name "Cardiology"  # Provision a new isolated clinic environment
+hebrah env architect "<prompt>"        # Design or auto-provision via Conversational Environment Architect
 hebrah env connect <env_id>            # Bind CLI/agent to environment & print endpoints
 hebrah env info [env_id]               # Inspect environment endpoints & attached database modules
+hebrah env studio [env_id] "<prompt>"  # Consult isolated Per-Environment GCP AI Studio
+hebrah env open-data [env_id]          # Inspect/search Open-Data Clinical & DICOM Enrichment Packs
+hebrah env tables [env_id]             # List isolated database tables and row counts
+hebrah env patients [env_id]           # List synthetic patients with clinical filters
+hebrah env admit [env_id] --count <n>  # Dynamically admit synthetic patients into cohort
 hebrah env query [env_id] --sql "..."  # Run credential-blind SQL query (SELECT + INSERT INTO app_outcomes)
 hebrah env trigger [env_id] --scenario <name>
 hebrah env logs [env_id]               # View environment activity & audit logs

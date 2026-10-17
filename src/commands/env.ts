@@ -173,6 +173,7 @@ export default async function env(
     case 'status':
     case 'show':
     case 'get':
+    case 'info':
       return statusEnv(subArgv, { ...options, _argv: subArgv });
     case 'pause':
       return pauseEnv(subArgv, { ...options, _argv: subArgv });
@@ -185,6 +186,23 @@ export default async function env(
     case 'query':
     case 'sql':
       return queryEnv(subArgv, { ...options, _argv: subArgv });
+    case 'tables':
+      return tablesEnv(subArgv, { ...options, _argv: subArgv });
+    case 'patients':
+      return patientsEnv(subArgv, { ...options, _argv: subArgv });
+    case 'admit':
+      return admitPatientsEnv(subArgv, { ...options, _argv: subArgv });
+    case 'logs':
+    case 'log':
+      return logsEnv(subArgv, { ...options, _argv: subArgv });
+    case 'studio':
+    case 'chat':
+      return studioEnv(subArgv, { ...options, _argv: subArgv });
+    case 'open-data':
+    case 'evidence':
+      return openDataEnv(subArgv, { ...options, _argv: subArgv });
+    case 'architect':
+      return architectEnv(subArgv, { ...options, _argv: subArgv });
     case 'wireguard':
     case 'wg':
       return wireguardEnv(subArgv, { ...options, _argv: subArgv });
@@ -213,14 +231,21 @@ function showHelp(): void {
 Subcommands:
   list (ls)                    List environments for the current org
   create (new)                 Provision a new isolated clinic environment
+  architect "<prompt>"         Design or auto-provision via Conversational Architect
   connect (attach) <id>        Attach this agent to an environment & set default
-  status (show) [id]           Show details, endpoints, and connected agents
+  status (info, show) [id]     Show details, endpoints, and connected agents
+  studio (chat) [id] "<msg>"   Consult the isolated Per-Environment GCP AI Studio
+  open-data (evidence) [id]    Inspect or search Open-Data Clinical & DICOM packs
+  tables [id]                  List isolated database tables and row counts
+  patients [id]                List synthetic patients with clinical filters
+  admit [id] --count <n>       Dynamically admit synthetic patients into cohort
+  logs [id]                    View environment activity and audit logs
   pause [id]                   Pause environment (halts hourly resource charge)
   resume [id]                  Resume a paused environment
   destroy (rm) <id>            Tear down an environment
   query (sql) [id] "<sql>"     Run credential-blind query on attached DB
   wireguard (wg) [id]          Export WireGuard VPN config for GUI access
-  scenario [id] --type <type>  Trigger a clinical EHR event (HL7 / FHIR)
+  scenario (trigger) [id]      Trigger a clinical EHR event (HL7 / FHIR)
   db-proxy [id]                Show developer GUI connection coordinates
 
 Flags (global for subcommands):
@@ -229,10 +254,14 @@ Flags (global for subcommands):
 Examples:
   hebrah env list
   hebrah env connect 4e39cc5c-f2f5-435c-a844-cf6b5d3bcb94 --name "clinic-agent"
-  hebrah env create --name "Pediatric Pilot" --clinic pediatric_specialty --addons postgres,neo4j
+  hebrah env create --name "Pediatric Pilot" --clinic pediatrics_neonatal --addons postgres,neo4j
+  hebrah env architect "Design an ICU sepsis environment with Qdrant and Neo4j" --auto-provision
+  hebrah env studio "Join our patients with PubMed RCT evidence and show CDS Hooks cards"
+  hebrah env open-data --search "sepsis"
   hebrah env query "SELECT * FROM patients LIMIT 5"
   hebrah env wireguard --out ./hebrah-clinic.conf
   hebrah env scenario --type admit_patient --patient-id P-1002
+  hebrah env logs --limit 20
 `);
 }
 
@@ -432,7 +461,7 @@ async function connectEnv(
     try {
       detail = await api.post<EnvironmentDetail>(`/v1/environments/${cleanId}/agents/connect`, {
         agent_name: agentName,
-        cli_version: '0.4.1',
+        cli_version: '0.4.2',
         platform: `${platform()}-${hostname()}`
       });
     } catch {
@@ -1035,6 +1064,583 @@ async function dbProxyEnv(
     console.log(dim(`  Option B (WireGuard Mesh): Run "hebrah db wireguard ${detail.id} --out ./hb-env.conf" and connect to ${wgIp}:${port}`));
     console.log(dim(`  AI Agents: Continue accessing data credential-blind via "hebrah db query ${detail.id} <sql>"`));
 
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: tables
+// ---------------------------------------------------------------------------
+
+async function tablesEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+
+  const { values } = parseArgs({
+    args: argv.filter((a) => a !== rawEnvId),
+    options: {
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: false,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  if (!envId) {
+    error('hebrah env tables: environment_id required');
+    console.error('Usage: hebrah env tables [environment_id] [--json]');
+    return 1;
+  }
+
+  try {
+    const res = await api.get<{
+      environment_id: string;
+      schema: string;
+      table_count: number;
+      total_rows: number;
+      tables: Array<{
+        name: string;
+        table_name: string;
+        row_count: number;
+        column_count: number;
+        category: string;
+        description: string;
+      }>;
+    }>(`/v1/environments/${safeId(envId, 'environment_id')}/db/tables`);
+
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+
+    console.log(bold(`Isolated Database Schema — ${res.schema} (${res.environment_id})`));
+    console.log();
+    const tablesList = res.tables ?? [];
+    if (tablesList.length === 0) {
+      console.log(dim('No tables found in schema.'));
+      return 0;
+    }
+
+    const headers = ['TABLE', 'CATEGORY', 'ROWS', 'COLUMNS', 'DESCRIPTION'];
+    const rows = tablesList.map((t) => [
+      t.name ?? t.table_name,
+      t.category ?? 'clinical',
+      String(t.row_count ?? 0),
+      String(t.column_count ?? 0),
+      (t.description ?? '').slice(0, 56)
+    ]);
+    table(headers, rows);
+    console.log();
+    console.log(dim(`${res.table_count ?? tablesList.length} tables · ${res.total_rows ?? 0} total rows`));
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: patients
+// ---------------------------------------------------------------------------
+
+async function patientsEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+
+  const { values } = parseArgs({
+    args: argv.filter((a) => a !== rawEnvId),
+    options: {
+      department: { type: 'string' },
+      diagnosis: { type: 'string' },
+      acuity: { type: 'string' },
+      search: { type: 'string' },
+      limit: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: false,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  if (!envId) {
+    error('hebrah env patients: environment_id required');
+    console.error(
+      'Usage: hebrah env patients [environment_id] [--department <dept>] [--diagnosis <dx>] [--acuity <acuity>] [--search <q>] [--limit <n>] [--json]'
+    );
+    return 1;
+  }
+
+  const queryParams: Record<string, string> = {};
+  if (typeof values.department === 'string' && values.department.trim()) {
+    queryParams.department = values.department.trim();
+  }
+  if (typeof values.diagnosis === 'string' && values.diagnosis.trim()) {
+    queryParams.diagnosis = values.diagnosis.trim();
+  }
+  if (typeof values.acuity === 'string' && values.acuity.trim()) {
+    queryParams.acuity = values.acuity.trim();
+  }
+  if (typeof values.search === 'string' && values.search.trim()) {
+    queryParams.search = values.search.trim();
+  }
+  if (typeof values.limit === 'string' && values.limit.trim()) {
+    queryParams.limit = values.limit.trim();
+  }
+
+  try {
+    const res = await api.get<Array<Record<string, unknown>>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/ehr/patients`,
+      queryParams
+    );
+    const patientsList = Array.isArray(res) ? res : [];
+
+    if (values.json) {
+      json(patientsList);
+      return 0;
+    }
+
+    if (patientsList.length === 0) {
+      console.log(dim('No matching synthetic patients found.'));
+      return 0;
+    }
+
+    const headers = ['ID', 'MRN', 'PATIENT NAME', 'DEPT', 'ACUITY', 'PRIMARY CONDITION'];
+    const rows = patientsList.map((p) => [
+      String(p.id ?? ''),
+      String(p.mrn ?? ''),
+      `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim(),
+      String(p.department ?? ''),
+      String(p.acuity_level ?? p.acuity ?? ''),
+      String(p.primary_condition ?? '').slice(0, 48)
+    ]);
+    table(headers, rows);
+    console.log();
+    console.log(dim(`Showing ${patientsList.length} synthetic patient(s)`));
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: admit
+// ---------------------------------------------------------------------------
+
+async function admitPatientsEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+
+  const { values } = parseArgs({
+    args: argv.filter((a) => a !== rawEnvId),
+    options: {
+      count: { type: 'string', default: '10' },
+      department: { type: 'string' },
+      departments: { type: 'string' },
+      diagnosis: { type: 'string' },
+      acuity: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: false,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  if (!envId) {
+    error('hebrah env admit: environment_id required');
+    console.error(
+      'Usage: hebrah env admit [environment_id] [--count 10] [--department <dept>] [--diagnosis <dx>] [--acuity <acuity>] [--json]'
+    );
+    return 1;
+  }
+
+  const count = Math.max(1, parseInt(String(values.count ?? '10'), 10) || 10);
+  const body: Record<string, unknown> = { count };
+  const rawDepts =
+    typeof values.departments === 'string'
+      ? values.departments
+      : typeof values.department === 'string'
+        ? values.department
+        : '';
+  if (rawDepts) {
+    body.departments = rawDepts.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (typeof values.diagnosis === 'string' && values.diagnosis.trim()) {
+    body.diagnosis_pathways = values.diagnosis.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (typeof values.acuity === 'string' && values.acuity.trim()) {
+    body.acuity_levels = values.acuity.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  try {
+    const res = await api.post<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/ehr/patients/generate`,
+      body
+    );
+
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+
+    const admittedCount = Number(res.admitted_count ?? count);
+    success(`Admitted ${bold(String(admittedCount))} synthetic patients into environment ${bold(envId)}`);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: logs
+// ---------------------------------------------------------------------------
+
+async function logsEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+
+  const { values } = parseArgs({
+    args: argv.filter((a) => a !== rawEnvId),
+    options: {
+      limit: { type: 'string', default: '25' },
+      'event-type': { type: 'string' },
+      'actor-type': { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: false,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  if (!envId) {
+    error('hebrah env logs: environment_id required');
+    console.error('Usage: hebrah env logs [environment_id] [--limit 25] [--event-type <type>] [--json]');
+    return 1;
+  }
+
+  const queryParams: Record<string, string> = {
+    limit: typeof values.limit === 'string' ? values.limit : '25'
+  };
+  if (typeof values['event-type'] === 'string' && values['event-type'].trim()) {
+    queryParams.event_type = values['event-type'].trim();
+  }
+  if (typeof values['actor-type'] === 'string' && values['actor-type'].trim()) {
+    queryParams.actor_type = values['actor-type'].trim();
+  }
+
+  try {
+    const res = await api.get<Array<Record<string, unknown>>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/logs`,
+      queryParams
+    );
+    const logsList = Array.isArray(res) ? res : [];
+
+    if (values.json) {
+      json(logsList);
+      return 0;
+    }
+
+    if (logsList.length === 0) {
+      console.log(dim('No activity logs found for this environment.'));
+      return 0;
+    }
+
+    const headers = ['TIMESTAMP', 'EVENT', 'ACTOR', 'STATUS', 'SUMMARY'];
+    const rows = logsList.map((l) => [
+      String(l.created_at ?? '').slice(0, 19),
+      String(l.event_type ?? ''),
+      `${l.actor_type ?? 'agent'}:${l.actor_id ?? ''}`.slice(0, 24),
+      l.status === 'success' ? green('success') : yellow(String(l.status ?? 'ok')),
+      String(l.summary ?? '').slice(0, 56)
+    ]);
+    table(headers, rows);
+    console.log();
+    console.log(dim(`Showing ${logsList.length} activity event(s) for ${envId}`));
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: studio
+// ---------------------------------------------------------------------------
+
+async function studioEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const firstPositional = argv.find((a) => !a.startsWith('-'));
+  // If firstPositional looks like a natural-language prompt (contains whitespace),
+  // resolve envId from defaultEnvId and treat firstPositional as the message.
+  const firstLooksLikePrompt =
+    typeof firstPositional === 'string' && /\s/.test(firstPositional.trim());
+
+  const rawEnvId = firstLooksLikePrompt ? undefined : firstPositional;
+  const remaining = rawEnvId ? argv.filter((a) => a !== rawEnvId) : argv;
+
+  const { values, positionals } = parseArgs({
+    args: remaining,
+    options: {
+      prompt: { type: 'string' },
+      message: { type: 'string' },
+      'session-id': { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  const message =
+    typeof values.prompt === 'string'
+      ? values.prompt
+      : typeof values.message === 'string'
+        ? values.message
+        : positionals[0];
+
+  if (!envId || !message) {
+    error('hebrah env studio: environment_id and prompt message required');
+    console.error(
+      'Usage: hebrah env studio [environment_id] "<prompt>" [--session-id <id>] [--json]'
+    );
+    return 1;
+  }
+
+  const body: Record<string, unknown> = {
+    message,
+    auto_run_tools: true
+  };
+  if (typeof values['session-id'] === 'string' && values['session-id'].trim()) {
+    body.session_id = values['session-id'].trim();
+  }
+
+  try {
+    const res = await api.post<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/studio/chat`,
+      body
+    );
+
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+
+    const reply = String(res.reply ?? res.assistant_reply ?? '');
+    const toolsInvoked = Array.isArray(res.tools_invoked) ? (res.tools_invoked as string[]) : [];
+    const packsQueried = Array.isArray(res.open_data_packs_queried)
+      ? (res.open_data_packs_queried as string[])
+      : [];
+    const guardrail = res.guardrail_triggered ? String(res.guardrail_triggered) : null;
+
+    console.log(bold(`Environment AI Studio — ${envId}`));
+    console.log(dim('──────────────────────────────────────────────────────────────────'));
+    console.log(reply);
+    console.log(dim('──────────────────────────────────────────────────────────────────'));
+    kv([
+      ['Session ID', String(res.session_id ?? 'n/a')],
+      ['Schema', String(res.schema_name ?? 'isolated')],
+      ['Tools Executed', toolsInvoked.join(', ') || 'none'],
+      ['Open-Data Packs', packsQueried.join(', ') || 'clinical_knowledge_v1'],
+      ['Guardrail Status', guardrail ? yellow(`blocked (${guardrail})`) : green('in_scope (3-layer skill lock active)')]
+    ]);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: open-data
+// ---------------------------------------------------------------------------
+
+async function openDataEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const rawEnvId = argv.find((a) => !a.startsWith('-'));
+
+  const { values } = parseArgs({
+    args: argv.filter((a) => a !== rawEnvId),
+    options: {
+      search: { type: 'string' },
+      query: { type: 'string' },
+      subpack: { type: 'string' },
+      specialty: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: false,
+    strict: false
+  });
+
+  const envId = resolveEnvId(rawEnvId);
+  if (!envId) {
+    error('hebrah env open-data: environment_id required');
+    console.error(
+      'Usage: hebrah env open-data [environment_id] [--search <term>] [--subpack <id>] [--specialty <spec>] [--json]'
+    );
+    return 1;
+  }
+
+  const queryParams: Record<string, string> = {};
+  const searchVal =
+    typeof values.search === 'string'
+      ? values.search
+      : typeof values.query === 'string'
+        ? values.query
+        : '';
+  if (searchVal.trim()) queryParams.search = searchVal.trim();
+  if (typeof values.subpack === 'string' && values.subpack.trim()) {
+    queryParams.subpack = values.subpack.trim();
+  }
+  if (typeof values.specialty === 'string' && values.specialty.trim()) {
+    queryParams.specialty = values.specialty.trim();
+  }
+
+  try {
+    const res = await api.get<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/open-data/catalog`,
+      queryParams
+    );
+
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+
+    const ck = (res.clinical_knowledge_pack ?? {}) as Record<string, unknown>;
+    const dicom = (res.dicom_imaging_pack ?? {}) as Record<string, unknown>;
+    const records = Array.isArray(ck.records) ? (ck.records as Array<Record<string, unknown>>) : [];
+
+    console.log(bold(`Open-Data Clinical & Imaging Enrichment Catalog — ${res.environment_name ?? envId}`));
+    console.log();
+    kv([
+      ['Environment ID', String(res.environment_id ?? envId)],
+      ['Isolated Schema', String(res.schema_name ?? 'n/a')],
+      ['Clinical Knowledge Pack', `clinical_knowledge_v1 (${ck.total ?? records.length} records)`],
+      ['DICOM Imaging Pack', `dicom_imaging_v1 (${dicom.total_exemplars ?? 0} studies)`]
+    ]);
+
+    if (records.length > 0) {
+      console.log();
+      const headers = ['ID', 'SUB-PACK', 'SPECIALTY', 'LICENSE', 'TITLE'];
+      const rows = records.slice(0, 15).map((r) => [
+        String(r.id ?? ''),
+        String(r.subpack ?? ''),
+        String(r.specialty ?? ''),
+        String(r.license ?? ''),
+        String(r.title ?? '').slice(0, 48)
+      ]);
+      table(headers, rows);
+    }
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: architect
+// ---------------------------------------------------------------------------
+
+async function architectEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      prompt: { type: 'string' },
+      message: { type: 'string' },
+      'session-id': { type: 'string' },
+      'auto-provision': { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const message =
+    typeof values.prompt === 'string'
+      ? values.prompt
+      : typeof values.message === 'string'
+        ? values.message
+        : positionals[0];
+
+  if (!message || !message.trim()) {
+    error('hebrah env architect: prompt message required');
+    console.error(
+      'Usage: hebrah env architect "<prompt>" [--auto-provision] [--session-id <id>] [--json]'
+    );
+    return 1;
+  }
+
+  const body: Record<string, unknown> = {
+    message: message.trim(),
+    auto_provision: Boolean(values['auto-provision'])
+  };
+  if (typeof values['session-id'] === 'string' && values['session-id'].trim()) {
+    body.session_id = values['session-id'].trim();
+  }
+
+  try {
+    const res = await api.post<Record<string, unknown>>('/v1/environments/architect/chat', body);
+
+    const provisioned = res.provisioned_environment as Record<string, unknown> | undefined;
+    if (provisioned?.id && typeof provisioned.id === 'string') {
+      try {
+        updateCredentials({ defaultEnvId: provisioned.id });
+      } catch {
+        // Ignore if credentials file not initialized
+      }
+    }
+
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+
+    const reply = String(res.assistant_reply ?? res.reply ?? '');
+    const bp = (res.blueprint ?? {}) as Record<string, unknown>;
+
+    console.log(bold('Conversational Environment Architect'));
+    console.log(dim('──────────────────────────────────────────────────────────────────'));
+    console.log(reply);
+    console.log(dim('──────────────────────────────────────────────────────────────────'));
+    kv([
+      ['Session ID', String(res.session_id ?? 'n/a')],
+      ['Scope Classification', String(res.scope_status ?? 'in_scope')],
+      ['Blueprint Name', String(bp.name ?? 'Custom Clinical Environment')],
+      ['Archetype', String(bp.clinic_type ?? 'hospital')],
+      ['Database Modules', Array.isArray(bp.addons) ? bp.addons.join(', ') : 'postgres']
+    ]);
+
+    if (provisioned?.id) {
+      console.log();
+      success(`Auto-provisioned environment: ${bold(String(provisioned.name ?? ''))} (${provisioned.id})`);
+    }
     return 0;
   } catch (err) {
     error((err as Error).message);

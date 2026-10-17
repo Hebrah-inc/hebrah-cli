@@ -1,6 +1,6 @@
 {
   "name": "@hebrah/cli",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Hebrah — Isolated Health Environments & credential-blind data layer for AI agents. Terminal-native CLI.",
   "bin": {
     "hebrah": "bin/hebrah"
@@ -20,6 +20,8 @@
     "hebrah",
     "postgresql",
     "fhir",
+    "hl7",
+    "dicom",
     "sftp",
     "sqlite",
     "http-rest"
