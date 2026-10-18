@@ -15,6 +15,7 @@ import {
   safeId,
   validateApiBaseUrl,
   inferApiUrlFromAppUrl,
+  CLI_VERSION,
   api
 } from '../src/api/client.js';
 import whoami from '../src/commands/whoami.js';
@@ -399,7 +400,7 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
         '/v1/environments/4e39cc5c-f2f5-435c-a844-cf6b5d3bcb94/agents/connect',
         expect.objectContaining({
           agent_name: 'Cursor Agent',
-          cli_version: '0.4.3'
+          cli_version: CLI_VERSION
         })
       );
       expect(loadCredentials()?.defaultEnvId).toBe('4e39cc5c-f2f5-435c-a844-cf6b5d3bcb94');
