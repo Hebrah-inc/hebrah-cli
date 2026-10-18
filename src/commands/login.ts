@@ -25,9 +25,9 @@ import {
   safeId,
   validateApiBaseUrl
 } from '../api/client.js';
-import { success, error, info, bold, dim, cyan, kv } from '../output/format.js';
+import { success, error, info, bold, dim, cyan, kv, json, sanitizeTerminalText } from '../output/format.js';
 import { startLoopbackAuth, type LoopbackAuthResult, type LoopbackAuthServer } from '../util/loopback.js';
-import { openBrowser } from '../util/browser.js';
+import { openBrowser, validateBrowserUrl } from '../util/browser.js';
 import type { EnvironmentDetail } from './env.js';
 
 interface DeviceCodeResponse {
@@ -89,23 +89,23 @@ async function pollStateTokenFromCloud(
   throw new Error(`Login timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
 }
 
-function resolveAppUrl(explicitAppUrl?: string, explicitApiUrl?: string): string {
+export function resolveAppUrl(explicitAppUrl?: string, explicitApiUrl?: string): string {
   if (explicitAppUrl) {
-    return explicitAppUrl.replace(/\/$/, '');
+    return validateApiBaseUrl(explicitAppUrl);
   }
   if (process.env.HEBRAH_APP_URL) {
-    return process.env.HEBRAH_APP_URL.replace(/\/$/, '');
+    return validateApiBaseUrl(process.env.HEBRAH_APP_URL);
   }
   const savedAppUrl = loadCredentials()?.appUrl;
   if (savedAppUrl) {
-    return savedAppUrl.replace(/\/$/, '');
+    return validateApiBaseUrl(savedAppUrl);
   }
   const apiUrl = explicitApiUrl ?? process.env.HEBRAH_API_URL ?? loadCredentials()?.apiUrl ?? '';
   if (apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')) {
     return 'http://localhost:3000';
   }
   if (apiUrl.includes('-api-')) {
-    return apiUrl.replace('-api-', '-app-').replace(/\/$/, '');
+    return validateApiBaseUrl(apiUrl.replace('-api-', '-app-'));
   }
   return 'https://app.hebrah.com';
 }
@@ -121,19 +121,32 @@ async function loginHeadlessDeviceFlow(timeoutMs: number): Promise<{
     host: clientHost
   });
 
+  const safeUriComplete = validateBrowserUrl(sanitizeTerminalText(codeResp.verification_uri_complete));
+  const safeUri = validateBrowserUrl(sanitizeTerminalText(codeResp.verification_uri));
+  const safeUserCode = sanitizeTerminalText(codeResp.user_code);
+
   console.log();
   info('Device authorization initiated for remote/headless environment.');
   console.log();
   console.log('  Open this link in any browser on any device:');
-  console.log(`    ${bold(codeResp.verification_uri_complete)}`);
+  console.log(`    ${bold(safeUriComplete)}`);
   console.log();
-  console.log(`  Or visit ${codeResp.verification_uri} and enter code:`);
-  console.log(`    ${bold(cyan(codeResp.user_code))}`);
+  console.log(`  Or visit ${safeUri} and enter code:`);
+  console.log(`    ${bold(cyan(safeUserCode))}`);
   console.log();
   console.log(dim('Waiting for authorization in browser (press Ctrl+C to cancel)...'));
 
-  const pollInterval = (codeResp.interval || 3) * 1000;
-  const deadline = Date.now() + Math.min(timeoutMs, (codeResp.expires_in || 900) * 1000);
+  const rawIntervalSec = Number(codeResp.interval);
+  const pollInterval = Math.min(
+    30_000,
+    Math.max(1_000, (Number.isFinite(rawIntervalSec) && rawIntervalSec > 0 ? rawIntervalSec : 3) * 1000)
+  );
+  const rawExpiresSec = Number(codeResp.expires_in);
+  const expiresMs = Math.min(
+    3_600_000,
+    Math.max(5_000, (Number.isFinite(rawExpiresSec) && rawExpiresSec > 0 ? rawExpiresSec : 900) * 1000)
+  );
+  const deadline = Date.now() + Math.min(timeoutMs, expiresMs);
 
   let cancelled = false;
   const onSigint = () => {
@@ -208,32 +221,40 @@ export default async function login(
   let apiKey = values.key as string | undefined;
   let orgNameFromAuth: string | undefined;
   let orgIdFromAuth: string | undefined;
-  const timeoutMs = values.timeout ? parseInt(values.timeout as string, 10) : 600_000;
+  let timeoutMs = 600_000;
+  if (values.timeout !== undefined) {
+    const parsedTimeout = parseInt(values.timeout as string, 10);
+    if (!Number.isFinite(parsedTimeout) || parsedTimeout < 1_000 || parsedTimeout > 3_600_000) {
+      error('--timeout must be between 1000 and 3600000 ms.');
+      return 1;
+    }
+    timeoutMs = parsedTimeout;
+  }
 
   const flagAppUrl = values['app-url'] as string | undefined;
   let flagApiUrl = values['api-url'] as string | undefined;
   let targetEnvId = (values['env-id'] as string | undefined) ?? process.env.HEBRAH_ENV_ID;
   const agentName = (values['agent-name'] as string | undefined) || `cli-agent-${hostname()}`;
 
-  if (!flagApiUrl && flagAppUrl) {
-    flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
-  }
-  const appUrl = resolveAppUrl(flagAppUrl, flagApiUrl);
-  if (!flagApiUrl && appUrl) {
-    const inferred = inferApiUrlFromAppUrl(appUrl);
-    if (inferred && !process.env.HEBRAH_API_URL) {
-      flagApiUrl = inferred;
+  let appUrl: string;
+  try {
+    if (!flagApiUrl && flagAppUrl) {
+      flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
     }
-  }
-
-  if (flagApiUrl) {
-    try {
+    appUrl = resolveAppUrl(flagAppUrl, flagApiUrl);
+    if (!flagApiUrl && appUrl) {
+      const inferred = inferApiUrlFromAppUrl(appUrl);
+      if (inferred && !process.env.HEBRAH_API_URL) {
+        flagApiUrl = inferred;
+      }
+    }
+    if (flagApiUrl) {
       flagApiUrl = validateApiBaseUrl(flagApiUrl);
       api.setBaseUrl(flagApiUrl);
-    } catch (err) {
-      error((err as Error).message);
-      return 1;
     }
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
   }
 
   // 1. Direct --key flag
@@ -252,8 +273,11 @@ export default async function login(
   else if (values.manual && process.stdin.isTTY) {
     const { createInterface } = await import('node:readline/promises');
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    apiKey = (await rl.question('API key (hb_conn_* or hb_pat_*): ')).trim();
-    rl.close();
+    try {
+      apiKey = (await rl.question('API key (hb_conn_* or hb_pat_*): ')).trim();
+    } finally {
+      rl.close();
+    }
   }
   // 4. Remote --headless Device Authorization (RFC 8628)
   else if (values.headless) {
@@ -428,22 +452,16 @@ export default async function login(
     }
 
     if (values.json) {
-      console.log(
-        JSON.stringify(
-          {
-            ok: true,
-            orgId: resolvedOrgId,
-            orgName: resolvedOrgName,
-            keyPrefix: maskApiKey(apiKey),
-            apiUrl: resolvedApiUrl,
-            appUrl,
-            defaultEnvId: targetEnvId ?? null,
-            environment: connectedEnv
-          },
-          null,
-          2
-        )
-      );
+      json({
+        ok: true,
+        orgId: resolvedOrgId,
+        orgName: resolvedOrgName,
+        keyPrefix: maskApiKey(apiKey),
+        apiUrl: resolvedApiUrl,
+        appUrl,
+        defaultEnvId: targetEnvId ?? null,
+        environment: connectedEnv
+      });
       return 0;
     }
 

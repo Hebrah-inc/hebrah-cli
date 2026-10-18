@@ -1,7 +1,9 @@
 // `hebrah packs` — list connector packs.
 
+import { parseArgs } from 'node:util';
 import { api } from '../api/client.js';
-import { json, table, dim } from '../output/format.js';
+import { json, table, dim, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface Pack {
   pack_id: string;
@@ -16,8 +18,8 @@ export default async function packs(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
-  const { values } = (await import('node:util')).parseArgs({
+  const argv = getArgv(options, _args);
+  const { values } = parseArgs({
     args: argv,
     options: {
       json: { type: 'boolean', default: false }
@@ -49,7 +51,7 @@ export default async function packs(
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }

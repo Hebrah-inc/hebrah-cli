@@ -48,11 +48,17 @@ export default async function connect(
     return 1;
   }
 
+  const ttl = Number.parseInt(String(values.ttl ?? '3600'), 10);
+  if (!Number.isFinite(ttl) || ttl < 60 || ttl > 604_800) {
+    error('Invalid --ttl: must be an integer between 60 and 604800 seconds');
+    return 1;
+  }
+
   try {
     const result = await api.post<ConnectionResponse>('/v1/connections', {
       target,
       scopes: (values.scopes as string).split(',').map((s) => s.trim()),
-      ttl: parseInt(values.ttl as string, 10),
+      ttl,
       tier: values.tier
     });
 

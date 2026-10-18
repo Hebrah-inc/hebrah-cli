@@ -9,7 +9,8 @@
 
 import { parseArgs } from 'node:util';
 import { api } from '../api/client.js';
-import { json, table, green, dim } from '../output/format.js';
+import { json, table, green, dim, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface Target {
   target: string;
@@ -28,7 +29,7 @@ export default async function discover(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -70,7 +71,7 @@ export default async function discover(
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }

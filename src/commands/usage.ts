@@ -2,7 +2,8 @@
 
 import { parseArgs } from 'node:util';
 import { api } from '../api/client.js';
-import { json, kv, dim } from '../output/format.js';
+import { json, kv, dim, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface UsageResponse {
   period: { start: string; end: string };
@@ -18,7 +19,7 @@ export default async function usage(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -49,7 +50,7 @@ export default async function usage(
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }

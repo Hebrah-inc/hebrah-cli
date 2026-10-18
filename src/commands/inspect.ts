@@ -1,7 +1,9 @@
 // `hebrah inspect <target>` — show scope grammar for a target.
 
+import { parseArgs } from 'node:util';
 import { api, safeId } from '../api/client.js';
-import { json, kv, dim, bold, sanitizeTerminalText, redactSecrets } from '../output/format.js';
+import { json, kv, dim, bold, error, sanitizeTerminalText } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface TargetDetail {
   target: string;
@@ -22,16 +24,16 @@ export default async function inspect(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const target = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!target) {
-    console.error('hebrah inspect: target required');
-    console.error('Usage: hebrah inspect <target>');
+    error('hebrah inspect: target required');
+    error('Usage: hebrah inspect <target>');
     return 1;
   }
 
   const flagOnly = argv.filter((a) => a !== target);
-  const { values } = (await import('node:util')).parseArgs({
+  const { values } = parseArgs({
     args: flagOnly,
     options: {
       json: { type: 'boolean', default: false }
@@ -84,7 +86,7 @@ export default async function inspect(
 
     return 0;
   } catch (err) {
-    console.error(redactSecrets(sanitizeTerminalText((err as Error).message)));
+    error((err as Error).message);
     return 4;
   }
 }

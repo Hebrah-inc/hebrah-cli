@@ -23,21 +23,16 @@
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { api, ApiError, TimeoutError } from '../api/client.js';
+import { api, ApiError, TimeoutError, validateApiBaseUrl } from '../api/client.js';
 import { loadCredentials } from '../config/credentials.js';
-import { openBrowser } from '../util/browser.js';
-import { json, success, info, warn, error, bold, dim } from '../output/format.js';
+import { openBrowser, validateBrowserUrl } from '../util/browser.js';
+import { json, success, info, warn, error, bold, dim, sanitizeTerminalText } from '../output/format.js';
 
 interface CheckoutSessionResponse {
   url: string;
   session_id: string;
   amount_cents: number;
   mode: string;
-}
-
-interface PortalSessionResponse {
-  portalUrl: string;
-  returnUrl: string;
 }
 
 interface AmountPreset {
@@ -53,6 +48,23 @@ const AMOUNT_PRESETS: AmountPreset[] = [
   { queries: 20_000, egressGb: 20, label: '$80 — 20k queries + 20 GB egress', usdCents: 8_000 },
   { queries: 100_000, egressGb: 100, label: '$400 — 100k queries + 100 GB egress', usdCents: 40_000 }
 ];
+
+export function validateCheckoutUrl(rawUrl: string): string {
+  const safeUrl = validateBrowserUrl(sanitizeTerminalText(rawUrl));
+  const parsed = new URL(safeUrl);
+  const host = parsed.hostname.toLowerCase();
+  const isStripeCheckout =
+    host === 'checkout.stripe.com' ||
+    host === 'billing.stripe.com' ||
+    host === 'pay.stripe.com' ||
+    host.endsWith('.stripe.com');
+  if (isStripeCheckout) {
+    return safeUrl;
+  }
+  // Allow trusted Hebrah/loopback origins (e.g. local/staging checkout redirect)
+  validateApiBaseUrl(parsed.origin);
+  return safeUrl;
+}
 
 export default async function topup(
   _args: string[],
@@ -70,9 +82,6 @@ export default async function topup(
     },
     allowPositionals: false
   });
-
-  // Note: --portal flag removed (backend has no /v1/billing/portal yet).
-  // Use `hebrah status` + manual Stripe dashboard for subscription mgmt.
 
   // Validate amount
   const amountUsd = values.amount !== undefined ? parseFloat(values.amount as string) : NaN;
@@ -98,7 +107,7 @@ export default async function topup(
     amountCents = Math.ceil(queries * 0.5); // 0.5 cents per query at $0.005/query
     description = `${queries.toLocaleString()} queries (~$${(amountCents / 100).toFixed(2)})`;
   } else {
-    if (amountUsd < 1 || amountUsd > 10_000) {
+    if (!Number.isFinite(amountUsd) || amountUsd < 1 || amountUsd > 10_000) {
       error('--amount must be between $1 and $10,000.');
       return 1;
     }
@@ -109,11 +118,15 @@ export default async function topup(
   // Interactive confirmation unless --yes
   if (!values.yes && input.isTTY) {
     const rl = createInterface({ input, output });
-    console.log();
-    info(`${bold(description)} → Stripe Checkout`);
-    info(dim('Card not stored locally; Stripe hosts the payment page.'));
-    const answer = (await rl.question('Continue? [Y/n] ')).trim().toLowerCase();
-    rl.close();
+    let answer = '';
+    try {
+      console.log();
+      info(`${bold(description)} → Stripe Checkout`);
+      info(dim('Card not stored locally; Stripe hosts the payment page.'));
+      answer = (await rl.question('Continue? [Y/n] ')).trim().toLowerCase();
+    } finally {
+      rl.close();
+    }
     if (answer && answer !== 'y' && answer !== 'yes') {
       info('Cancelled.');
       return 0;
@@ -132,8 +145,10 @@ export default async function topup(
       amount_cents: amountCents
     });
 
+    const safeCheckoutUrl = validateCheckoutUrl(session.url);
+
     if (options.json || values.json) {
-      json(session);
+      json({ ...session, url: safeCheckoutUrl });
       return 0;
     }
 
@@ -144,18 +159,18 @@ export default async function topup(
 
     if (values.print) {
       info(dim('Open this URL in your browser to complete payment:'));
-      console.log(session.url);
+      console.log(safeCheckoutUrl);
       console.log();
       info('After paying, run `hebrah usage` to verify your balance updated.');
       return 0;
     }
 
-    const opened = await openBrowser(session.url);
+    const opened = await openBrowser(safeCheckoutUrl);
     if (opened) {
       info(`Opened in your browser. Complete payment there.`);
     } else {
       warn('Could not auto-open a browser. Open this URL manually:');
-      console.log(session.url);
+      console.log(safeCheckoutUrl);
     }
     console.log();
     info('After paying, run `hebrah usage` to verify your balance updated.');
@@ -169,8 +184,6 @@ export default async function topup(
     if (err instanceof ApiError) {
       error(err.message);
       if (err.suggestion) info(err.suggestion);
-      // 402 here is a special case: user is trying to top up BECAUSE they're out
-      // of credit. Don't tell them to add credit — that's what they're doing.
       if (err.statusCode === 402) {
         info('(If this is a billing-blocked account, contact hello@hebrah.com to recover access.)');
       }
@@ -188,15 +201,19 @@ async function interactiveTopup(options: Record<string, unknown>): Promise<numbe
   }
 
   const rl = createInterface({ input, output });
-  console.log();
-  info(bold('Choose a topup amount:'));
-  for (let i = 0; i < AMOUNT_PRESETS.length; i++) {
-    console.log(`  ${dim(`${i + 1}.`)} ${AMOUNT_PRESETS[i].label}`);
-  }
-  console.log(`  ${dim('5.')} Custom amount`);
+  let choice = '';
+  try {
+    console.log();
+    info(bold('Choose a topup amount:'));
+    for (let i = 0; i < AMOUNT_PRESETS.length; i++) {
+      console.log(`  ${dim(`${i + 1}.`)} ${AMOUNT_PRESETS[i].label}`);
+    }
+    console.log(`  ${dim('5.')} Custom amount`);
 
-  const choice = (await rl.question(dim('Select [1-5]: '))).trim();
-  rl.close();
+    choice = (await rl.question(dim('Select [1-5]: '))).trim();
+  } finally {
+    rl.close();
+  }
 
   let preset: AmountPreset | null = null;
   const idx = parseInt(choice, 10);
@@ -204,8 +221,12 @@ async function interactiveTopup(options: Record<string, unknown>): Promise<numbe
     preset = AMOUNT_PRESETS[idx - 1];
   } else if (idx === 5) {
     const rl2 = createInterface({ input, output });
-    const raw = (await rl2.question('Amount in USD (min $1, max $10,000): ')).trim();
-    rl2.close();
+    let raw = '';
+    try {
+      raw = (await rl2.question('Amount in USD (min $1, max $10,000): ')).trim();
+    } finally {
+      rl2.close();
+    }
     const usd = parseFloat(raw);
     if (Number.isNaN(usd) || usd < 1 || usd > 10_000) {
       error('Invalid amount.');

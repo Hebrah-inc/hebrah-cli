@@ -6,9 +6,12 @@
 //   hebrah query conn_uuid --sql "..." --max-rows 100 --json
 
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { api, safeId } from '../api/client.js';
-import { json, table, dim, green, yellow } from '../output/format.js';
+import { json, table, dim, green, yellow, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
+
+const MAX_SQL_FILE_BYTES = 1_048_576; // 1 MB
 
 interface QueryResponse {
   rows: Array<Record<string, unknown>>;
@@ -24,11 +27,11 @@ export default async function query(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!connId) {
-    console.error('hebrah query: connection_id required');
-    console.error('Usage: hebrah query <connection_id> --sql "SELECT ..."');
+    error('hebrah query: connection_id required');
+    error('Usage: hebrah query <connection_id> --sql "SELECT ..."');
     return 1;
   }
 
@@ -48,14 +51,36 @@ export default async function query(
 
   let sql: string | undefined = values.sql as string | undefined;
   if (!sql && values.file) {
-    sql = readFileSync(values.file as string, 'utf-8');
+    try {
+      const filePath = String(values.file);
+      const st = statSync(filePath);
+      if (!st.isFile()) {
+        error(`hebrah query: --file must point to a regular file (${filePath})`);
+        return 1;
+      }
+      if (st.size > MAX_SQL_FILE_BYTES) {
+        error(`hebrah query: SQL file exceeds maximum size of 1 MB (${st.size} bytes)`);
+        return 1;
+      }
+      sql = readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      error(`hebrah query: failed to read --file: ${(err as Error).message}`);
+      return 1;
+    }
   }
-  if (!sql) {
-    console.error('hebrah query: --sql or --file required');
+  if (!sql || !sql.trim()) {
+    error('hebrah query: --sql or --file required');
     return 1;
   }
 
-  const maxRows = values['max-rows'] ? parseInt(values['max-rows'] as string, 10) : undefined;
+  let maxRows: number | undefined;
+  if (values['max-rows'] !== undefined) {
+    maxRows = Number.parseInt(String(values['max-rows']), 10);
+    if (!Number.isFinite(maxRows) || maxRows < 1 || maxRows > 10_000) {
+      error('hebrah query: --max-rows must be an integer between 1 and 10000');
+      return 1;
+    }
+  }
 
   try {
     const result = await api.post<QueryResponse>(`/v1/connections/${safeId(connId, 'connection_id')}/query`, {
@@ -84,7 +109,7 @@ export default async function query(
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }

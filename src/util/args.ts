@@ -8,11 +8,11 @@
 // slice as `options._argv` and each command re-parses that instead of
 // the polluted `args` parameter.
 
-export function getPositional(args: string[], options: Record<string, unknown>): string | undefined {
-  const argv = (options._argv as string[] | undefined) ?? args;
+export function getPositional(args: string[], options: Record<string, unknown> = {}): string | undefined {
+  const argv = (options?._argv as string[] | undefined) ?? args;
   return argv.find((a) => !a.startsWith('-') && !a.includes('='));
 }
 
-export function getArgv(options: Record<string, unknown>, fallback: string[] = []): string[] {
-  return (options._argv as string[] | undefined) ?? fallback;
+export function getArgv(options: Record<string, unknown> = {}, fallback: string[] = []): string[] {
+  return (options?._argv as string[] | undefined) ?? fallback;
 }

@@ -1,8 +1,9 @@
 // `hebrah whoami` — show account info + balance.
 
-import { loadCredentials } from '../config/credentials.js';
+import { parseArgs } from 'node:util';
+import { loadCredentials, maskApiKey } from '../config/credentials.js';
 import { api } from '../api/client.js';
-import { kv, green, dim, yellow, error } from '../output/format.js';
+import { kv, json, error } from '../output/format.js';
 
 interface UsageResponse {
   orgId: string;
@@ -23,13 +24,14 @@ export default async function whoami(
   options: Record<string, unknown>
 ): Promise<number> {
   const creds = loadCredentials();
-  if (!creds) {
+  const envKey = process.env.HEBRAH_API_KEY?.trim();
+  if (!creds && !envKey) {
     error('Not logged in. Run `hebrah signup` or `hebrah login`.');
     return 2;
   }
 
   const argv = (options._argv as string[] | undefined) ?? _args;
-  const { values } = (await import('node:util')).parseArgs({
+  const { values } = parseArgs({
     args: argv,
     options: {
       json: { type: 'boolean', default: false }
@@ -37,31 +39,31 @@ export default async function whoami(
     allowPositionals: false
   });
 
+  const keyPrefix = creds?.keyPrefix ?? (envKey ? maskApiKey(envKey) : '');
+  const defaultEnvId = creds?.defaultEnvId ?? process.env.HEBRAH_ENV_ID;
+
   try {
     const usage = await api.get<UsageResponse>('/v1/agent/account/usage');
 
     if (values.json) {
-      const { apiKey: _redacted, ...safeCreds } = creds;
-      console.log(
-        JSON.stringify(
-          {
-            ...safeCreds,
-            apiUrl: api.getBaseUrl(),
-            usage
-          },
-          null,
-          2
-        )
-      );
+      const { apiKey: _redacted, ...safeCreds } = creds ?? {};
+      void _redacted;
+      json({
+        ...safeCreds,
+        keyPrefix,
+        defaultEnvId,
+        apiUrl: api.getBaseUrl(),
+        usage
+      });
       return 0;
     }
 
     const rows: Array<[string, string]> = [
       ['Account', usage.orgName],
       ['Org ID', usage.orgId],
-      ['Key prefix', creds.keyPrefix],
+      ['Key prefix', keyPrefix],
       ['API Endpoint', api.getBaseUrl()],
-      ['Default Env', creds.defaultEnvId ?? '(none)'],
+      ['Default Env', defaultEnvId ?? '(none)'],
       ['Tier', usage.tier],
       ['Balance', `$${(usage.balanceCents / 100).toFixed(4)}`],
       ['Queries this period', `${usage.queries} / ${usage.quota.queries}`],

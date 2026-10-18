@@ -16,7 +16,7 @@ export function validateBrowserUrl(rawUrl: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') {
     throw new Error('Browser URL is required.');
   }
-  if (/[\x00-\x1f\x7f\s`$"';|<>\\]/.test(rawUrl)) {
+  if (/[\x00-\x1f\x7f-\x9f\s`$"';|<>\\]/.test(rawUrl)) {
     throw new Error('Browser URL contains unsafe or disallowed characters.');
   }
 
@@ -25,6 +25,10 @@ export function validateBrowserUrl(rawUrl: string): string {
     parsed = new URL(rawUrl);
   } catch {
     throw new Error('Invalid browser URL format.');
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('Browser URL must not contain embedded credentials.');
   }
 
   if (parsed.protocol === 'https:') {

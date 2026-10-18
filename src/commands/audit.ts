@@ -7,7 +7,8 @@
 
 import { parseArgs } from 'node:util';
 import { api, safeId } from '../api/client.js';
-import { json, table, dim, green, red, yellow } from '../output/format.js';
+import { json, table, dim, green, red, yellow, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface AuditEvent {
   id: string;
@@ -31,7 +32,7 @@ export default async function audit(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   // First non-flag token is subcommand (verify|export|help) or connId
   const tokens = argv.filter((a) => !a.startsWith('-'));
   const subcommand = tokens[0];
@@ -56,7 +57,7 @@ export default async function audit(
 }
 
 async function auditShow(connId: string, options: Record<string, unknown>): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? [];
+  const argv = getArgv(options, []);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -101,7 +102,7 @@ async function auditShow(connId: string, options: Record<string, unknown>): Prom
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }
@@ -123,7 +124,7 @@ async function auditVerify(connId: string, _options: Record<string, unknown>): P
     }
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }
@@ -143,11 +144,11 @@ async function auditExport(connId: string, _options: Record<string, unknown>): P
       events
     };
 
-    process.stdout.write(JSON.stringify(exported, null, 2) + '\n');
+    json(exported);
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }

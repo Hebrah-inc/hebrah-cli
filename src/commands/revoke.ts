@@ -15,12 +15,13 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { api, safeId } from '../api/client.js';
 import { success, error, warn } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 export default async function revoke(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -51,8 +52,12 @@ export default async function revoke(
           warn(`Reason: ${values.reason}`);
         }
         const rl = createInterface({ input, output });
-        const answer = (await rl.question('Type "revoke all" to confirm: ')).trim();
-        rl.close();
+        let answer = '';
+        try {
+          answer = (await rl.question('Type "revoke all" to confirm: ')).trim();
+        } finally {
+          rl.close();
+        }
         if (answer !== 'revoke all') {
           error('Aborted.');
           return 1;

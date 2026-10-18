@@ -4,7 +4,10 @@
 // For dev, run `pnpm dev` (tsx watch src/index.ts) or `node --experimental-loader=tsx bin/hebrah`.
 
 import('../dist/index.js').catch((err) => {
+  const msg = String(err?.message ?? err ?? 'unknown error')
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+    .replace(/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_HEBRAH_TOKEN]');
   console.error('hebrah: failed to load CLI');
-  console.error(err.message);
+  console.error(msg);
   process.exit(4);
 });

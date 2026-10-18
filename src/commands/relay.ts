@@ -22,8 +22,25 @@ import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { api, safeId } from '../api/client.js';
-import { success, info, warn, error, json, table, dim, green, red, cyan, yellow } from '../output/format.js';
+import {
+  success,
+  warn,
+  error,
+  json,
+  table,
+  dim,
+  green,
+  red,
+  cyan,
+  yellow,
+  redactSecrets,
+  sanitizeTerminalText
+} from '../output/format.js';
 import { getArgv } from '../util/args.js';
+
+function shellQuoteSingle(val: string): string {
+  return `'${sanitizeTerminalText(val).replace(/'/g, "'\\''")}'`;
+}
 
 // ---------------------------------------------------------------------------
 // Shared types matching hebrah-api/app/connections/relay_routes.py
@@ -57,10 +74,6 @@ export default async function relay(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  // Strip the subcommand name off the front so per-subcommand handlers
-  // see only their own argv slice. The top-level parser in index.ts
-  // forwards positionals[0] = 'relay' as the command name, but our
-  // subcommand handlers expect argv that starts AFTER their name.
   const sub = argv.find((a) => !a.startsWith('-')) ?? args[0];
   const subIdx = sub ? argv.indexOf(sub) : -1;
   const subArgv = subIdx >= 0 ? argv.slice(subIdx + 1) : argv;
@@ -203,19 +216,22 @@ The printed token is consumed once. Pipe it directly into:
       return 0;
     }
 
+    const safeTargetDisplay = redactSecrets(sanitizeTerminalText(targetUri));
+    const safeToken = sanitizeTerminalText(result.token);
+
     console.log(green('✓ Enrollment token minted.'));
     console.log('');
-    console.log(`  ${dim('Target:')}  ${targetUri}`);
-    console.log(`  ${dim('Scopes:')}  ${scopes.join(', ')}`);
+    console.log(`  ${dim('Target:')}  ${safeTargetDisplay}`);
+    console.log(`  ${dim('Scopes:')}  ${sanitizeTerminalText(scopes.join(', '))}`);
     console.log(`  ${dim('Expires:')} in ${result.expires_in_seconds}s (${new Date(result.exp * 1000).toISOString()})`);
     console.log('');
     console.log(cyan('Token (single-use, 5-min TTL):'));
-    console.log(`  ${result.token}`);
+    console.log(`  ${safeToken}`);
     console.log('');
     console.log(dim('Next: pipe to the relay binary on the customer network:'));
     console.log(dim(`  hebrah-relay install \\`));
-    console.log(dim(`    --token '${result.token}' \\`));
-    console.log(dim(`    --postgres-url '${targetUri}'`));
+    console.log(dim(`    --token ${shellQuoteSingle(safeToken)} \\`));
+    console.log(dim(`    --postgres-url ${shellQuoteSingle(safeTargetDisplay)}`));
     console.log('');
     return 0;
   } catch (err: any) {
@@ -236,18 +252,15 @@ The printed token is consumed once. Pipe it directly into:
 function extractTablesFromScopes(scopes: string[]): string[] {
   const tables = new Set<string>();
   for (const s of scopes) {
-    // "table:accounts" form (MVP SQLite-style)
     if (s.startsWith('table:')) {
       tables.add(s.substring('table:'.length));
       continue;
     }
-    // "gl:read" / "gl:write" form (table:access) — table name is the part before ':'
     if (s.endsWith(':read') || s.endsWith(':write')) {
       const table = s.replace(/:(read|write)$/, '');
       if (table.length > 0) tables.add(table);
       continue;
     }
-    // "database:<id>" form (workspace pack) — table name comes from the catalog
     if (s.startsWith('database:')) {
       tables.add(s.substring('database:'.length));
     }
@@ -276,7 +289,10 @@ async function listRelays(
   try {
     const relays = await api.get<RelaySummary[]>('/v1/relays');
 
-    const filtered = values.all ? relays : relays.filter((r) => !r.revoked);
+    const filtered = (values.all ? relays : relays.filter((r) => !r.revoked)).map((r) => ({
+      ...r,
+      target_uri: redactSecrets(sanitizeTerminalText(r.target_uri))
+    }));
 
     if (values.json) {
       json(filtered);
@@ -324,8 +340,12 @@ async function relayStatus(
     error('Usage: hebrah relay status <relay_id>');
     return 1;
   }
-  // Strip the relay_id positional before parseArgs so it doesn't trip
-  // allowPositionals:false.
+  try {
+    safeId(relayId, 'relay_id');
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
   const flagsOnly = argv.filter((a) => a !== relayId);
 
   const { values } = parseArgs({
@@ -336,7 +356,12 @@ async function relayStatus(
 
   try {
     const relays = await api.get<RelaySummary[]>('/v1/relays');
-    const matches = relays.filter((r) => r.relay_id === relayId);
+    const matches = relays
+      .filter((r) => r.relay_id === relayId)
+      .map((r) => ({
+        ...r,
+        target_uri: redactSecrets(sanitizeTerminalText(r.target_uri))
+      }));
     if (matches.length === 0) {
       warn(`hebrah relay status: relay "${relayId}" not found in your org`);
       return 4;
@@ -351,14 +376,13 @@ async function relayStatus(
     console.log(`Relay ${cyan(r.relay_id)}`);
     console.log('');
     console.log(`  ${dim('Target:')}       ${r.target_uri}`);
-    console.log(`  ${dim('Connector:')}    ${r.connector}`);
-    console.log(`  ${dim('Cert serial:')}  ${r.cert_serial}`);
+    console.log(`  ${dim('Connector:')}    ${sanitizeTerminalText(r.connector)}`);
+    console.log(`  ${dim('Cert serial:')}  ${sanitizeTerminalText(r.cert_serial)}`);
     console.log(`  ${dim('Issued:')}       ${formatDate(r.issued_at)}`);
     console.log(`  ${dim('Not before:')}   ${formatDate(r.not_before)}`);
     console.log(`  ${dim('Not after:')}    ${formatDate(r.not_after)}  ${certFreshnessLabel(r.not_after)}`);
     console.log(`  ${dim('Status:')}       ${r.revoked ? red('revoked') : green('active')}`);
 
-    // If multiple cert rows for the same relay (from prior rotations), show them all
     if (matches.length > 1) {
       console.log('');
       console.log(dim(`  (${matches.length} cert rows for this relay — showing latest; pass --all to list)`));
@@ -385,6 +409,12 @@ async function revokeRelay(
     error('Usage: hebrah relay revoke <relay_id> [--reason <text>] [--yes]');
     return 1;
   }
+  try {
+    safeId(relayId, 'relay_id');
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
   const flagsOnly = argv.filter((a) => a !== relayId);
 
   const { values } = parseArgs({
@@ -397,18 +427,21 @@ async function revokeRelay(
   });
 
   try {
-    // Safety: confirm before destructive action
     const skipConfirm = values.yes === true || !input.isTTY;
     if (!skipConfirm) {
       warn(`This will REVOKE all active certs for relay ${relayId}.`);
       warn('The relay\'s mTLS handshake will fail on its next connection attempt.');
       warn('In-flight queries will fail. This is irreversible.');
       if (values.reason) {
-        console.log(dim(`  reason: ${values.reason}`));
+        console.log(dim(`  reason: ${sanitizeTerminalText(String(values.reason))}`));
       }
       const rl = createInterface({ input, output });
-      const answer = await rl.question('Type the relay_id to confirm: ');
-      rl.close();
+      let answer = '';
+      try {
+        answer = await rl.question('Type the relay_id to confirm: ');
+      } finally {
+        rl.close();
+      }
       if (answer.trim() !== relayId) {
         warn('Revoke aborted (input did not match).');
         return 1;

@@ -557,6 +557,166 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       }
     });
   });
-});
 
+  describe('S-9: Second-Pass Production Readiness & Pen-Test Hardening', () => {
+    it('CLI-S9-1: validateCheckoutUrl enforces HTTPS and trusted Stripe/Hebrah hosts', async () => {
+      const { validateCheckoutUrl } = await import('../src/commands/topup.js');
+
+      expect(validateCheckoutUrl('https://checkout.stripe.com/c/pay/cs_test_123')).toBe(
+        'https://checkout.stripe.com/c/pay/cs_test_123'
+      );
+      expect(validateCheckoutUrl('https://billing.stripe.com/p/session/123')).toBe(
+        'https://billing.stripe.com/p/session/123'
+      );
+      expect(validateCheckoutUrl('https://app.hebrah.com/settings/billing')).toBe(
+        'https://app.hebrah.com/settings/billing'
+      );
+
+      expect(() => validateCheckoutUrl('https://evil-phishing.example.com/pay')).toThrow(
+        /untrusted Hebrah host/i
+      );
+      expect(() => validateCheckoutUrl('http://checkout.stripe.com/c/pay/cs_test_123')).toThrow(
+        /HTTPS/i
+      );
+      expect(() => validateCheckoutUrl('https://user:pass@checkout.stripe.com/pay')).toThrow(
+        /embedded credentials/i
+      );
+    });
+
+    it('CLI-S9-2: resolveAppUrl validates --app-url and HEBRAH_APP_URL against SSRF and cleartext', async () => {
+      const { resolveAppUrl } = await import('../src/commands/login.js');
+
+      expect(resolveAppUrl('https://app.hebrah.com/')).toBe('https://app.hebrah.com');
+      expect(resolveAppUrl('http://localhost:3020/')).toBe('http://localhost:3020');
+
+      expect(() => resolveAppUrl('http://evil.example.com')).toThrow(/cleartext HTTP/i);
+      expect(() => resolveAppUrl('https://169.254.169.254')).toThrow(/untrusted Hebrah host/i);
+      expect(() => resolveAppUrl('https://admin:secret@app.hebrah.com')).toThrow(
+        /embedded credentials/i
+      );
+    });
+
+    it('CLI-S9-3: validateApiBaseUrl and validateBrowserUrl block embedded credentials and 8-bit C1 controls', () => {
+      expect(() => validateApiBaseUrl('https://user:pass@api.hebrah.com')).toThrow(
+        /embedded credentials/i
+      );
+      expect(() => validateApiBaseUrl('https://api.hebrah.com/\x9b2J')).toThrow(
+        /control characters/i
+      );
+      expect(() => validateBrowserUrl('https://user:pass@app.hebrah.com/login')).toThrow(
+        /embedded credentials/i
+      );
+      expect(() => validateBrowserUrl('https://app.hebrah.com/\x9d52;c;YWJj')).toThrow(
+        /unsafe or disallowed characters/i
+      );
+    });
+
+    it('CLI-S9-4: redactSecrets scrubs DB connection URI passwords while preserving user and host', async () => {
+      const { redactSecrets } = await import('../src/output/format.js');
+
+      const raw = 'Target: postgresql://ehr_admin:Sup3rS3cretP@ss!@db.internal.hospital.org:5432/clinical_prod';
+      const scrubbed = redactSecrets(raw);
+      expect(scrubbed).not.toContain('Sup3rS3cretP');
+      expect(scrubbed).toContain('postgresql://ehr_admin:[REDACTED]@db.internal.hospital.org:5432/clinical_prod');
+    });
+
+    it('CLI-S9-5: json() escapes 8-bit C1 control characters and colorize() sanitizes even when NO_COLOR=1', async () => {
+      const { json, bold } = await import('../src/output/format.js');
+
+      json({
+        evilC1: 'prefix\x9b2J\x9d52;c;YWJj\x9csuffix',
+        dbUri: 'redis://default:my_redis_secret_pw@cache.internal:6379/0'
+      });
+
+      const emitted = String(logSpy.mock.calls[0]?.[0] ?? '');
+      expect(emitted).not.toContain('\x9b');
+      expect(emitted).not.toContain('\x9d');
+      expect(emitted).toContain('\\u009b');
+      expect(emitted).toContain('\\u009d');
+      expect(emitted).not.toContain('my_redis_secret_pw');
+      expect(emitted).toContain('redis://default:[REDACTED]@cache.internal:6379/0');
+
+      const prevNoColor = process.env.NO_COLOR;
+      try {
+        process.env.NO_COLOR = '1';
+        const rendered = bold('Safe\x1b]52;c;YWJj\x07Title\x9b2J');
+        expect(rendered).toBe('SafeTitle');
+        expect(rendered).not.toContain('\x1b');
+        expect(rendered).not.toContain('\x9b');
+      } finally {
+        if (prevNoColor === undefined) {
+          delete process.env.NO_COLOR;
+        } else {
+          process.env.NO_COLOR = prevNoColor;
+        }
+      }
+    });
+
+    it('CLI-S9-6: signup --json masks raw apiKey in stdout while persisting full key to 0600 credentials', async () => {
+      const signup = (await import('../src/commands/signup.js')).default;
+
+      vi.spyOn(api, 'post').mockResolvedValueOnce({
+        orgId: 'org_sec_99',
+        orgName: 'SecTest Agent',
+        apiKey: 'hb_live_super_secret_newly_minted_key_123456',
+        trial: {
+          credits: { queries: 1000, egressBytes: 52428800 },
+          expiresAt: '2026-11-01T00:00:00Z'
+        },
+        claimUrl: 'https://app.hebrah.com/claim-org/hb_claim_secret_token_999'
+      });
+
+      const code = await signup(['--headless', '--name', 'SecTest Agent', '--json']);
+      expect(code).toBe(0);
+
+      const jsonOut = String(logSpy.mock.calls[0]?.[0] ?? '');
+      expect(jsonOut).not.toContain('hb_live_super_secret_newly_minted_key_123456');
+      const parsed = JSON.parse(jsonOut);
+      expect(parsed.keyPrefix).toContain('hb_live_');
+
+      // Verify full key was saved to credentials file
+      const saved = loadCredentials();
+      expect(saved?.apiKey).toBe('hb_live_super_secret_newly_minted_key_123456');
+    });
+
+    it('CLI-S9-7: query --file rejects files larger than 1 MB', async () => {
+      const queryCmd = (await import('../src/commands/query.js')).default;
+      const bigFile = join(tempDir, 'huge.sql');
+      writeFileSync(bigFile, 'SELECT ' + '1,'.repeat(600_000) + '1;');
+
+      const code = await queryCmd(['conn_123', '--file', bigFile]);
+      expect(code).toBe(1);
+      const errOut = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(errOut).toContain('SQL file exceeds maximum size of 1 MB');
+    });
+
+    it('CLI-S9-8: wallet status renders unlinked card warning cleanly without undefined', async () => {
+      saveCredentials({ apiKey: 'hb_live_test_wallet_key_123456' });
+      vi.spyOn(api, 'get').mockResolvedValueOnce({
+        org_id: 'org_1',
+        tier: 'trial',
+        balance_cents: 500,
+        auto_reload: {
+          enabled: true,
+          threshold_cents: 200,
+          amount_cents: 1000,
+          stripe_customer_linked: false
+        },
+        burn_30d: {
+          window_days: 30,
+          queries: 10,
+          cost_cents: 25,
+          avg_cost_per_query_cents: 2.5
+        },
+        projected_days_to_empty: 12
+      });
+
+      const code = await wallet([]);
+      expect(code).toBe(0);
+      const allLogs = logSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(allLogs).toContain('not linked');
+      expect(allLogs).not.toContain('undefined');
+    });
+  });
+});
 

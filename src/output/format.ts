@@ -17,11 +17,6 @@ const COLORS = {
   gray: '\x1b[90m'
 };
 
-function colorize(s: string, color: keyof typeof COLORS): string {
-  if (process.env.NO_COLOR || !process.stdout.isTTY) return s;
-  return `${COLORS[color]}${s}${COLORS.reset}`;
-}
-
 // Strip dangerous terminal escape sequences (OSC 52 clipboard hijack, OSC 8 hyperlinks,
 // 8-bit C1 equivalents, cursor repositioning, window title injection) and raw control characters.
 const OSC_OR_DCS_RE =
@@ -47,11 +42,18 @@ export function sanitizeAllowingSgr(raw: string): string {
     .replace(RAW_CTRL_NO_ESC_RE, '');
 }
 
+function colorize(s: string, color: keyof typeof COLORS): string {
+  const safe = sanitizeAllowingSgr(s);
+  if (process.env.NO_COLOR || !process.stdout.isTTY) return safe;
+  return `${COLORS[color]}${safe}${COLORS.reset}`;
+}
+
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
-  [/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_HEBRAH_TOKEN]'],
+  [/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b(?!\.\.\.)/g, '[REDACTED_HEBRAH_TOKEN]'],
   [/\benc:v1:[A-Za-z0-9+/=_:-]+/g, 'enc:v1:[REDACTED]'],
-  [/(PrivateKey\s*=\s*)[^\r\n]+/gi, '$1[REDACTED]'],
-  [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]']
+  [/(PrivateKey[ \t]*=[ \t]*)(?!\s*(?:<redacted|\[REDACTED\]))[^\r\n"]+/gi, '$1[REDACTED]'],
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]'],
+  [/(\b[a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)([^\s/]+)(@)/gi, '$1[REDACTED]$3']
 ];
 
 export function redactSecrets(raw: string): string {
@@ -72,7 +74,11 @@ export function cyan(s: string): string { return colorize(s, 'cyan'); }
 export function gray(s: string): string { return colorize(s, 'gray'); }
 
 export function json(data: unknown): void {
-  console.log(JSON.stringify(data, null, 2));
+  const serialized = redactSecrets(JSON.stringify(data, null, 2) ?? 'null');
+  const safeJson = serialized.replace(/[\x7f-\x9f]/g, (ch) =>
+    `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+  );
+  console.log(safeJson);
 }
 
 export function table(headers: string[], rows: string[][]): void {

@@ -35,13 +35,16 @@
 //     Display connection coordinates and guidance for human developer database GUIs over WireGuard.
 
 import { parseArgs } from 'node:util';
-import { writeFileSync, existsSync, lstatSync, chmodSync } from 'node:fs';
 import { hostname, platform } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { api, safeId, CLI_VERSION } from '../api/client.js';
 import { loadCredentials, updateCredentials } from '../config/credentials.js';
-import { normalizeWireguardConfig } from './db.js';
+import {
+  normalizeWireguardConfig,
+  redactWireguardPrivateKey,
+  writeWireguardConfigFile
+} from './db.js';
 import {
   success,
   info,
@@ -71,13 +74,6 @@ function resolveEnvId(explicitId?: string): string | undefined {
     return process.env.HEBRAH_ENV_ID.trim();
   }
   return loadCredentials()?.defaultEnvId;
-}
-
-function redactWireguardPrivateKey(configText: string): string {
-  return configText.replace(
-    /^(\s*PrivateKey\s*=\s*).+$/gim,
-    '$1<redacted — use --out ./wg.conf or --reveal-private-key>'
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +370,14 @@ async function createEnv(
   const addons = rawAddons.split(',').map((s: string) => s.trim()).filter(Boolean);
   const patientCount = typeof values.patients === 'string' ? parseInt(values.patients, 10) : 25;
   const bedCount = typeof values.beds === 'string' ? parseInt(values.beds, 10) : 40;
+  if (!Number.isInteger(patientCount) || patientCount < 1 || patientCount > 5000) {
+    error('hebrah env create: --patients must be an integer between 1 and 5000');
+    return 1;
+  }
+  if (!Number.isInteger(bedCount) || bedCount < 1 || bedCount > 5000) {
+    error('hebrah env create: --beds must be an integer between 1 and 5000');
+    return 1;
+  }
 
   try {
     const created = await api.post<EnvironmentDetail>('/v1/environments', {
@@ -446,7 +450,7 @@ async function connectEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env connect: environment_id required');
-    console.error('Usage: hebrah env connect <environment_id> [--agent-name <name>] [--json]');
+    error('Usage: hebrah env connect <environment_id> [--agent-name <name>] [--json]');
     return 1;
   }
 
@@ -528,7 +532,7 @@ async function statusEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env status: environment_id required');
-    console.error('Usage: hebrah env status <environment_id> [--json]');
+    error('Usage: hebrah env status <environment_id> [--json]');
     return 1;
   }
 
@@ -616,7 +620,7 @@ async function pauseEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env pause: environment_id required');
-    console.error('Usage: hebrah env pause <environment_id>');
+    error('Usage: hebrah env pause <environment_id>');
     return 1;
   }
 
@@ -659,7 +663,7 @@ async function resumeEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env resume: environment_id required');
-    console.error('Usage: hebrah env resume <environment_id>');
+    error('Usage: hebrah env resume <environment_id>');
     return 1;
   }
 
@@ -703,7 +707,7 @@ async function destroyEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env destroy: environment_id required');
-    console.error('Usage: hebrah env destroy <environment_id> [--yes]');
+    error('Usage: hebrah env destroy <environment_id> [--yes]');
     return 1;
   }
 
@@ -777,7 +781,7 @@ async function queryEnv(
 
   if (!envId || !sql) {
     error('hebrah env query: environment_id and SQL query required');
-    console.error('Usage: hebrah env query <environment_id> "<sql>" [--addon <postgres>] [--json]');
+    error('Usage: hebrah env query <environment_id> "<sql>" [--addon <postgres>] [--json]');
     return 1;
   }
 
@@ -844,7 +848,7 @@ async function wireguardEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env wireguard: environment_id required');
-    console.error('Usage: hebrah env wireguard <environment_id> [--out <file.conf>] [--reveal-private-key] [--json]');
+    error('Usage: hebrah env wireguard <environment_id> [--out <file.conf>] [--reveal-private-key] [--json]');
     return 1;
   }
 
@@ -861,18 +865,7 @@ async function wireguardEnv(
     const outPath = typeof values.out === 'string' ? values.out : undefined;
 
     if (outPath) {
-      if (existsSync(outPath)) {
-        const st = lstatSync(outPath);
-        if (st.isSymbolicLink()) {
-          throw new Error(`Security error: Refusing to write WireGuard private key to symlink (${outPath})`);
-        }
-      }
-      writeFileSync(outPath, configText, { encoding: 'utf-8', mode: 0o600 });
-      try {
-        chmodSync(outPath, 0o600);
-      } catch {
-        // Ignore on platforms that don't support POSIX modes
-      }
+      writeWireguardConfigFile(outPath, configText);
       if (values.json) {
         const safeConfig = revealKey ? configText : redactWireguardPrivateKey(configText);
         json({
@@ -956,7 +949,7 @@ async function scenarioEnv(
 
   if (!envId || !scenarioType) {
     error('hebrah env scenario: environment_id and --type required');
-    console.error(
+    error(
       'Usage: hebrah env scenario <environment_id> --type <admit_patient|transfer_patient|discharge_patient|abnormal_lab_alert> [--patient-id <pid>] [--notes <notes>] [--json]'
     );
     return 1;
@@ -1019,7 +1012,14 @@ async function dbProxyEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env db-proxy: environment_id required');
-    console.error('Usage: hebrah env db-proxy <environment_id> [port] [--port 5432] [--addon postgres] [--json]');
+    error('Usage: hebrah env db-proxy <environment_id> [port] [--port 5432] [--addon postgres] [--json]');
+    return 1;
+  }
+
+  const portStr = typeof values.port === 'string' ? values.port : (rawPositionalPort ?? '5432');
+  const port = parseInt(portStr, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    error('hebrah env db-proxy: port must be between 1 and 65535');
     return 1;
   }
 
@@ -1027,8 +1027,6 @@ async function dbProxyEnv(
     const detail = await api.get<EnvironmentDetail>(`/v1/environments/${safeId(envId, 'environment_id')}`);
 
     const wgIp = detail.wireguard_ip ?? '10.42.0.1';
-    const portStr = typeof values.port === 'string' ? values.port : (rawPositionalPort ?? '5432');
-    const port = parseInt(portStr, 10) || 5432;
     const addon = typeof values.addon === 'string' ? values.addon : 'postgres';
 
     const infoData = {
@@ -1096,7 +1094,7 @@ async function tablesEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env tables: environment_id required');
-    console.error('Usage: hebrah env tables [environment_id] [--json]');
+    error('Usage: hebrah env tables [environment_id] [--json]');
     return 1;
   }
 
@@ -1175,7 +1173,7 @@ async function patientsEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env patients: environment_id required');
-    console.error(
+    error(
       'Usage: hebrah env patients [environment_id] [--department <dept>] [--diagnosis <dx>] [--acuity <acuity>] [--search <q>] [--limit <n>] [--json]'
     );
     return 1;
@@ -1262,13 +1260,17 @@ async function admitPatientsEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env admit: environment_id required');
-    console.error(
+    error(
       'Usage: hebrah env admit [environment_id] [--count 10] [--department <dept>] [--diagnosis <dx>] [--acuity <acuity>] [--json]'
     );
     return 1;
   }
 
-  const count = Math.max(1, parseInt(String(values.count ?? '10'), 10) || 10);
+  const count = parseInt(String(values.count ?? '10'), 10);
+  if (!Number.isInteger(count) || count < 1 || count > 500) {
+    error('hebrah env admit: --count must be an integer between 1 and 500');
+    return 1;
+  }
   const body: Record<string, unknown> = { count };
   const rawDepts =
     typeof values.departments === 'string'
@@ -1332,7 +1334,7 @@ async function logsEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env logs: environment_id required');
-    console.error('Usage: hebrah env logs [environment_id] [--limit 25] [--event-type <type>] [--json]');
+    error('Usage: hebrah env logs [environment_id] [--limit 25] [--event-type <type>] [--json]');
     return 1;
   }
 
@@ -1421,7 +1423,7 @@ async function studioEnv(
 
   if (!envId || !message) {
     error('hebrah env studio: environment_id and prompt message required');
-    console.error(
+    error(
       'Usage: hebrah env studio [environment_id] "<prompt>" [--session-id <id>] [--json]'
     );
     return 1;
@@ -1498,7 +1500,7 @@ async function openDataEnv(
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
     error('hebrah env open-data: environment_id required');
-    console.error(
+    error(
       'Usage: hebrah env open-data [environment_id] [--search <term>] [--subpack <id>] [--specialty <spec>] [--json]'
     );
     return 1;
@@ -1597,7 +1599,7 @@ async function architectEnv(
 
   if (!message || !message.trim()) {
     error('hebrah env architect: prompt message required');
-    console.error(
+    error(
       'Usage: hebrah env architect "<prompt>" [--auto-provision] [--session-id <id>] [--json]'
     );
     return 1;

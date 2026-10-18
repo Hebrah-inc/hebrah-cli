@@ -6,15 +6,8 @@
 //   audit export
 
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { CLI_VERSION as PACKAGE_VERSION } from './api/client.js';
 import { redactSecrets, sanitizeTerminalText } from './output/format.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PACKAGE_VERSION = JSON.parse(
-  readFileSync(join(__dirname, '..', 'package.json'), 'utf-8')
-).version;
 
 // Command registry (Wave 1)
 const COMMANDS: Record<string, CommandDescriptor> = {

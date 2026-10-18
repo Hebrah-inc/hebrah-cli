@@ -11,6 +11,7 @@ import { parseArgs } from 'node:util';
 import { api, ApiError, inferApiUrlFromAppUrl, validateApiBaseUrl } from '../api/client.js';
 import { saveCredentials, maskApiKey } from '../config/credentials.js';
 import { json, success, info, error, bold } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface SignupResponse {
   orgId: string;
@@ -28,9 +29,9 @@ interface SignupResponse {
 
 export default async function signup(
   _args: string[],
-  options: Record<string, unknown>
+  options: Record<string, unknown> = {}
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -46,19 +47,22 @@ export default async function signup(
     allowPositionals: false
   });
 
-  const flagAppUrl = values['app-url'] as string | undefined;
+  let flagAppUrl = values['app-url'] as string | undefined;
   let flagApiUrl = values['api-url'] as string | undefined;
-  if (!flagApiUrl && flagAppUrl) {
-    flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
-  }
-  if (flagApiUrl) {
-    try {
+  try {
+    if (flagAppUrl) {
+      flagAppUrl = validateApiBaseUrl(flagAppUrl);
+    }
+    if (!flagApiUrl && flagAppUrl) {
+      flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
+    }
+    if (flagApiUrl) {
       flagApiUrl = validateApiBaseUrl(flagApiUrl);
       api.setBaseUrl(flagApiUrl);
-    } catch (err) {
-      error((err as Error).message);
-      return 1;
     }
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
   }
 
   // Interactive prompts (only if TTY and no flags)
@@ -68,32 +72,42 @@ export default async function signup(
   if (!orgName && process.stdin.isTTY && !values.headless) {
     const { createInterface } = await import('node:readline/promises');
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    orgName = await rl.question('Organization name: ');
-    rl.close();
+    try {
+      orgName = await rl.question('Organization name: ');
+    } finally {
+      rl.close();
+    }
   }
 
-  if (!orgName || orgName.length < 2) {
+  if (!orgName || orgName.trim().length < 2) {
     error('Organization name must be at least 2 characters.');
     return 1;
   }
+  orgName = orgName.trim();
 
   if (!values.headless) {
     if (!inviteEmail && process.stdin.isTTY) {
       const { createInterface } = await import('node:readline/promises');
       const rl = createInterface({ input: process.stdin, output: process.stdout });
-      inviteEmail = await rl.question('Invite email (for billing ownership): ');
-      rl.close();
+      try {
+        inviteEmail = await rl.question('Invite email (for billing ownership): ');
+      } finally {
+        rl.close();
+      }
     }
     if (!inviteEmail || !inviteEmail.includes('@')) {
       error('A valid email is required for billing ownership. Use --headless to skip.');
       return 1;
     }
+    inviteEmail = inviteEmail.trim();
   }
+
+  const safeSlug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
 
   try {
     const result = await api.post<SignupResponse>('/v1/agent/account', {
       orgName,
-      inviteEmail: inviteEmail ?? `${orgName.replace(/\s+/g, '-')}@agent.local`,
+      inviteEmail: inviteEmail ?? `${safeSlug}@hebrah-agent.io`,
       headless: values.headless ?? false,
       agentName: (values['agent-name'] as string | undefined) ?? orgName
     });
@@ -104,13 +118,14 @@ export default async function signup(
       new Date(Date.now() + 14 * 86400000).toISOString();
 
     const resolvedApiUrl = api.getBaseUrl();
+    const keyPrefix = maskApiKey(result.apiKey);
 
     // Persist credentials locally
     saveCredentials({
       apiKey: result.apiKey,
       orgId: result.orgId,
       orgName: result.orgName,
-      keyPrefix: maskApiKey(result.apiKey),
+      keyPrefix,
       createdAt: new Date().toISOString(),
       apiUrl: resolvedApiUrl,
       appUrl: flagAppUrl,
@@ -124,7 +139,12 @@ export default async function signup(
     });
 
     if (values.json) {
-      json(result);
+      const { apiKey: _rawKey, ...safeResult } = result;
+      void _rawKey;
+      json({
+        ...safeResult,
+        keyPrefix
+      });
     } else {
       success(`Account created: ${bold(result.orgName)} (${result.orgId})`);
       info(`API key saved to ~/.hebrah/credentials (mode 0600)`);

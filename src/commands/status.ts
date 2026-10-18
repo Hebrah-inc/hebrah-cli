@@ -1,7 +1,9 @@
 // `hebrah status <conn>` — show connection status.
 
+import { parseArgs } from 'node:util';
 import { api, safeId } from '../api/client.js';
-import { json, kv, dim, green } from '../output/format.js';
+import { json, kv, green, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface ConnectionDetail {
   connectionId: string;
@@ -21,15 +23,15 @@ export default async function status(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!connId) {
-    console.error('hebrah status: connection_id required');
+    error('hebrah status: connection_id required');
     return 1;
   }
 
   const flagOnly = argv.filter((a) => a !== connId);
-  const { values } = (await import('node:util')).parseArgs({
+  const { values } = parseArgs({
     args: flagOnly,
     options: {
       json: { type: 'boolean', default: false }
@@ -60,7 +62,7 @@ export default async function status(
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
 }

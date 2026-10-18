@@ -113,11 +113,31 @@ export function normalizeWireguardFilename(rawFilename: string | undefined, envI
   return `${stem}.conf`;
 }
 
-function redactWireguardPrivateKey(configText: string): string {
+export function redactWireguardPrivateKey(configText: string): string {
   return configText.replace(
     /^(\s*PrivateKey\s*=\s*).+$/gim,
     '$1<redacted — use --out ./wg.conf or --reveal-private-key>'
   );
+}
+
+export function writeWireguardConfigFile(outPath: string, configText: string): string {
+  const resolved = resolvePath(outPath);
+  if (existsSync(resolved)) {
+    const st = lstatSync(resolved);
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `Security error: Refusing to write WireGuard private key to symlink (${resolved})`
+      );
+    }
+  }
+  const cleanConfig = sanitizeTerminalText(configText);
+  writeFileSync(resolved, cleanConfig, { encoding: 'utf-8', mode: 0o600 });
+  try {
+    chmodSync(resolved, 0o600);
+  } catch {
+    // Ignore on non-POSIX filesystems
+  }
+  return resolved;
 }
 
 export async function ensureEnvironmentOrigin(
@@ -402,21 +422,7 @@ export default async function dbCommand(
       }
 
       if (outPath) {
-        const resolved = resolvePath(outPath);
-        if (existsSync(resolved)) {
-          const st = lstatSync(resolved);
-          if (st.isSymbolicLink()) {
-            throw new Error(
-              `Security error: Refusing to write WireGuard private key to symlink (${resolved})`
-            );
-          }
-        }
-        writeFileSync(resolved, configText, { encoding: 'utf-8', mode: 0o600 });
-        try {
-          chmodSync(resolved, 0o600);
-        } catch {
-          // Ignore on non-POSIX filesystems
-        }
+        const resolved = writeWireguardConfigFile(outPath, configText);
 
         if (values.json) {
           const safeConfig = revealKey
@@ -484,7 +490,9 @@ export default async function dbCommand(
         dim('──────────────────────────────────────────────────────────────────')
       );
       console.log(
-        revealKey ? configText : redactWireguardPrivateKey(configText)
+        sanitizeTerminalText(
+          revealKey ? configText : redactWireguardPrivateKey(configText)
+        )
       );
       console.log(
         dim('──────────────────────────────────────────────────────────────────')

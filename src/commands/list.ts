@@ -2,7 +2,8 @@
 
 import { parseArgs } from 'node:util';
 import { api } from '../api/client.js';
-import { json, table, dim } from '../output/format.js';
+import { json, table, dim, error, formatBytes, formatDuration } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface Connection {
   connectionId: string;
@@ -18,7 +19,7 @@ export default async function list(
   _args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -51,7 +52,7 @@ export default async function list(
       c.connectionId.substring(0, 8) + '...',
       c.target,
       c.scopes.join(', ').substring(0, 40),
-      formatTtl(c.ttlRemaining),
+      formatDuration(c.ttlRemaining),
       String(c.queriesRun),
       formatBytes(c.bytesEgressed)
     ]);
@@ -63,21 +64,7 @@ export default async function list(
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    error((err as Error).message);
     return 4;
   }
-}
-
-function formatTtl(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }

@@ -19,9 +19,9 @@ function loadPackageVersion(): string {
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
-    return pkg.version || '0.4.3';
+    return pkg.version || '0.4.4';
   } catch {
-    return '0.4.3';
+    return '0.4.4';
   }
 }
 
@@ -138,15 +138,20 @@ export function validateApiBaseUrl(rawUrl: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') {
     throw new Error('API URL is required.');
   }
-  if (/[\x00-\x1f\x7f]/.test(rawUrl)) {
+  const trimmed = rawUrl.trim();
+  if (/[\x00-\x1f\x7f-\x9f\s]/.test(trimmed)) {
     throw new Error('API URL contains invalid control characters.');
   }
 
   let parsed: URL;
   try {
-    parsed = new URL(rawUrl.trim());
+    parsed = new URL(trimmed);
   } catch {
     throw new Error(`Invalid URL format: "${rawUrl}"`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('Security error: API/App URL must not contain embedded credentials.');
   }
 
   const host = parsed.hostname.toLowerCase();
@@ -371,11 +376,7 @@ function mapError(status: number, body: unknown): ApiError {
     }
   }
 
-  message = message
-    .replace(/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_HEBRAH_TOKEN]')
-    .replace(/\benc:v1:[A-Za-z0-9+/=_:-]+/g, 'enc:v1:[REDACTED]')
-    .replace(/(PrivateKey\s*=\s*)[^\r\n]+/gi, '$1[REDACTED]')
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+  message = redactSecrets(sanitizeTerminalText(message));
 
   const suggestion = (body as any)?.suggestion;
 
