@@ -1,6 +1,6 @@
 ---
 name: hebrah
-version: 0.4.3
+version: 0.4.5
 description: Isolated Health Environments & credential-blind clinical data connections for AI agents. Use Hebrah when the task requires connecting to a clinic environment (FHIR R4, HL7 v2 WebSocket, DICOMweb PACS, X12 EDI, Postgres, SQLite, Qdrant, Neo4j), consulting the isolated Environment AI Studio, or querying Open-Data Clinical & Imaging Enrichment Packs without receiving raw database credentials.
 ---
 
@@ -8,7 +8,7 @@ description: Isolated Health Environments & credential-blind clinical data conne
 
 ## 3-Step Agent Onboarding (90 seconds)
 
-### Step 1 — Install or Upgrade `@hebrah/cli` (v0.4.3+)
+### Step 1 — Install or Upgrade `@hebrah/cli` (v0.4.5+)
 
 ```bash
 npm install -g @hebrah/cli@latest
@@ -83,7 +83,7 @@ hebrah env trigger <ENV_ID> --scenario vital_alert
 hebrah env logs <ENV_ID>
 ```
 
-## CLI Command Summary (`@hebrah/cli` v0.4.3)
+## CLI Command Summary (`@hebrah/cli` v0.4.5)
 
 ```bash
 hebrah login [--app-url <url>] [--api-url <url>] [--env-id <id>] [--key <token>] [--headless]
