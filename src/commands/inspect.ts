@@ -1,7 +1,7 @@
 // `hebrah inspect <target>` — show scope grammar for a target.
 
-import { api } from '../api/client.js';
-import { json, kv, dim, bold } from '../output/format.js';
+import { api, safeId } from '../api/client.js';
+import { json, kv, dim, bold, sanitizeTerminalText, redactSecrets } from '../output/format.js';
 
 interface TargetDetail {
   target: string;
@@ -41,7 +41,7 @@ export default async function inspect(
 
   try {
     const detail = await api.get<TargetDetail>(
-      `/v1/connections/targets/${encodeURIComponent(target)}`
+      `/v1/connections/targets/${safeId(target, 'target')}`
     );
 
     if (values.json) {
@@ -49,8 +49,8 @@ export default async function inspect(
       return 0;
     }
 
-    console.log(bold(detail.label));
-    console.log(dim(detail.description));
+    console.log(bold(sanitizeTerminalText(detail.label)));
+    console.log(dim(sanitizeTerminalText(detail.description)));
     console.log();
 
     kv([
@@ -65,24 +65,26 @@ export default async function inspect(
     console.log();
     console.log(bold('Required scopes:'));
     for (const scope of detail.required_scopes) {
-      console.log(`  ${scope}`);
+      console.log(`  ${sanitizeTerminalText(scope)}`);
     }
 
     console.log();
     console.log(bold('Example:'));
-    console.log(`  hebrah connect ${detail.target} --scopes ${detail.example_scopes}`);
+    console.log(
+      `  hebrah connect ${sanitizeTerminalText(detail.target)} --scopes ${sanitizeTerminalText(detail.example_scopes)}`
+    );
 
     if (detail.sample_queries && detail.sample_queries.length > 0) {
       console.log();
       console.log(bold('Sample queries:'));
       for (const q of detail.sample_queries) {
-        console.log(`  ${dim(q)}`);
+        console.log(`  ${dim(sanitizeTerminalText(q))}`);
       }
     }
 
     return 0;
   } catch (err) {
-    console.error((err as Error).message);
+    console.error(redactSecrets(sanitizeTerminalText((err as Error).message)));
     return 4;
   }
 }

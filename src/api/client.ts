@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCredentials } from '../config/credentials.js';
+import { redactSecrets, sanitizeTerminalText } from '../output/format.js';
 
 const DEFAULT_PROD_API_URL = 'https://api.hebrah.com';
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -18,9 +19,9 @@ function loadPackageVersion(): string {
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
-    return pkg.version || '0.4.1';
+    return pkg.version || '0.4.2';
   } catch {
-    return '0.4.1';
+    return '0.4.2';
   }
 }
 
@@ -39,15 +40,51 @@ export interface RequestOptions {
   timeoutMs?: number;
 }
 
+function scrubErrorValue(val: unknown, depth = 0): unknown {
+  if (depth > 6 || val === null || val === undefined) return val;
+  if (typeof val === 'string') {
+    return redactSecrets(sanitizeTerminalText(val));
+  }
+  if (Array.isArray(val)) {
+    return val.map((item) => scrubErrorValue(item, depth + 1));
+  }
+  if (typeof val === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      out[k] = scrubErrorValue(v, depth + 1);
+    }
+    return out;
+  }
+  return val;
+}
+
 export class ApiError extends Error {
+  public readonly body: unknown;
+  public readonly suggestion?: string;
+
   constructor(
     message: string,
     public readonly statusCode: number,
-    public readonly body: unknown,
-    public readonly suggestion?: string
+    body: unknown,
+    suggestion?: string
   ) {
-    super(message);
+    super(redactSecrets(sanitizeTerminalText(message)));
     this.name = 'ApiError';
+    this.body = scrubErrorValue(body);
+    this.suggestion =
+      typeof suggestion === 'string'
+        ? redactSecrets(sanitizeTerminalText(suggestion))
+        : undefined;
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      name: this.name,
+      message: this.message,
+      statusCode: this.statusCode,
+      suggestion: this.suggestion,
+      body: this.body
+    };
   }
 }
 
@@ -57,7 +94,7 @@ export class TimeoutError extends Error {
     public readonly timeoutMs: number,
     public readonly suggestion?: string
   ) {
-    super(message);
+    super(redactSecrets(sanitizeTerminalText(message)));
     this.name = 'TimeoutError';
   }
 }
@@ -231,7 +268,23 @@ class HebrahApi {
     params?: Record<string, string>,
     opts?: RequestOptions
   ): Promise<T> {
-    if (!path.startsWith('/v1/') || path.includes('..') || path.includes('\\')) {
+    let decodedPath = path;
+    try {
+      decodedPath = decodeURIComponent(path);
+    } catch {
+      throw new Error(`Security error: malformed URL encoding in API request path "${path}".`);
+    }
+
+    if (
+      !path.startsWith('/v1/') ||
+      !decodedPath.startsWith('/v1/') ||
+      path.includes('..') ||
+      decodedPath.includes('..') ||
+      path.includes('\\') ||
+      decodedPath.includes('\\') ||
+      decodedPath.includes('\0') ||
+      /%2e|%2f|%5c|%00/i.test(path)
+    ) {
       throw new Error(`Security error: invalid API request path "${path}".`);
     }
 
@@ -268,6 +321,7 @@ class HebrahApi {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
+        redirect: 'error',
         signal: controller.signal
       });
 

@@ -23,16 +23,28 @@ function colorize(s: string, color: keyof typeof COLORS): string {
 }
 
 // Strip dangerous terminal escape sequences (OSC 52 clipboard hijack, OSC 8 hyperlinks,
-// cursor repositioning, window title injection) and raw control characters from untrusted data.
-const OSC_OR_DCS_RE = /\x1b(?:\][\s\S]*?(?:\x07|\x1b\\)|[PX^_][\s\S]*?\x1b\\)/g;
-const CSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+// 8-bit C1 equivalents, cursor repositioning, window title injection) and raw control characters.
+const OSC_OR_DCS_RE =
+  /(?:\x1b(?:\][\s\S]*?(?:\x07|\x1b\\|\x9c)|[PX^_][\s\S]*?(?:\x07|\x1b\\|\x9c))|[\x90\x98\x9d\x9e\x9f][\s\S]*?(?:\x07|\x1b\\|\x9c))/g;
+const CSI_RE = /(?:\x1b\[|\x9b)[0-9;?]*[ -/]*[@-~]/g;
+const NON_SGR_CSI_RE = /(?:\x1b\[|\x9b)(?![0-9;]*m)[0-9;?]*[ -/]*[@-~]/g;
+const BARE_ESC_RE = /\x1b(?!\[[0-9;]*m)/g;
 const RAW_CTRL_RE = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+const RAW_CTRL_NO_ESC_RE = /[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f-\x9f]/g;
 
 export function sanitizeTerminalText(raw: string): string {
   return String(raw)
     .replace(OSC_OR_DCS_RE, '')
     .replace(CSI_RE, '')
     .replace(RAW_CTRL_RE, '');
+}
+
+export function sanitizeAllowingSgr(raw: string): string {
+  return String(raw)
+    .replace(OSC_OR_DCS_RE, '')
+    .replace(NON_SGR_CSI_RE, '')
+    .replace(BARE_ESC_RE, '')
+    .replace(RAW_CTRL_NO_ESC_RE, '');
 }
 
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
@@ -93,26 +105,26 @@ export function kv(pairs: Array<[string, string]>, labelColor: keyof typeof COLO
   const maxLabel = Math.max(...pairs.map(([k]) => sanitizeTerminalText(k).length));
   for (const [key, value] of pairs) {
     const paddedKey = sanitizeTerminalText(key).padEnd(maxLabel);
-    // Preserve intentional SGR color sequences emitted by CLI commands while stripping OSC/control chars
-    const safeVal = String(value).replace(OSC_OR_DCS_RE, '').replace(RAW_CTRL_RE, '');
+    // Preserve intentional SGR color sequences emitted by CLI commands while stripping OSC/CSI/control chars
+    const safeVal = sanitizeAllowingSgr(String(value));
     console.log(`${colorize(paddedKey, labelColor)}  ${safeVal}`);
   }
 }
 
 export function success(message: string): void {
-  console.log(`${green('✓')} ${sanitizeTerminalText(message)}`);
+  console.log(`${green('✓')} ${sanitizeAllowingSgr(message)}`);
 }
 
 export function warn(message: string): void {
-  console.error(`${yellow('!')} ${redactSecrets(sanitizeTerminalText(message))}`);
+  console.error(`${yellow('!')} ${redactSecrets(sanitizeAllowingSgr(message))}`);
 }
 
 export function error(message: string): void {
-  console.error(`${red('✗')} ${redactSecrets(sanitizeTerminalText(message))}`);
+  console.error(`${red('✗')} ${redactSecrets(sanitizeAllowingSgr(message))}`);
 }
 
 export function info(message: string): void {
-  console.log(`${blue('ℹ')} ${sanitizeTerminalText(message)}`);
+  console.log(`${blue('ℹ')} ${sanitizeAllowingSgr(message)}`);
 }
 
 export function formatBytes(bytes: number): string {

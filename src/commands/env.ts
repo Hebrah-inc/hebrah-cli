@@ -57,7 +57,9 @@ import {
   cyan,
   yellow,
   formatBytes,
-  formatCents
+  formatCents,
+  sanitizeTerminalText,
+  redactSecrets
 } from '../output/format.js';
 import { getArgv } from '../util/args.js';
 
@@ -1444,14 +1446,14 @@ async function studioEnv(
       return 0;
     }
 
-    const reply = String(res.reply ?? res.assistant_reply ?? '');
+    const reply = redactSecrets(sanitizeTerminalText(String(res.reply ?? res.assistant_reply ?? '')));
     const toolsInvoked = Array.isArray(res.tools_invoked) ? (res.tools_invoked as string[]) : [];
     const packsQueried = Array.isArray(res.open_data_packs_queried)
       ? (res.open_data_packs_queried as string[])
       : [];
     const guardrail = res.guardrail_triggered ? String(res.guardrail_triggered) : null;
 
-    console.log(bold(`Environment AI Studio — ${envId}`));
+    console.log(bold(`Environment AI Studio — ${sanitizeTerminalText(envId)}`));
     console.log(dim('──────────────────────────────────────────────────────────────────'));
     console.log(reply);
     console.log(dim('──────────────────────────────────────────────────────────────────'));
@@ -1532,7 +1534,11 @@ async function openDataEnv(
     const dicom = (res.dicom_imaging_pack ?? {}) as Record<string, unknown>;
     const records = Array.isArray(ck.records) ? (ck.records as Array<Record<string, unknown>>) : [];
 
-    console.log(bold(`Open-Data Clinical & Imaging Enrichment Catalog — ${res.environment_name ?? envId}`));
+    console.log(
+      bold(
+        `Open-Data Clinical & Imaging Enrichment Catalog — ${sanitizeTerminalText(String(res.environment_name ?? envId))}`
+      )
+    );
     console.log();
     kv([
       ['Environment ID', String(res.environment_id ?? envId)],
@@ -1622,7 +1628,7 @@ async function architectEnv(
       return 0;
     }
 
-    const reply = String(res.assistant_reply ?? res.reply ?? '');
+    const reply = redactSecrets(sanitizeTerminalText(String(res.assistant_reply ?? res.reply ?? '')));
     const bp = (res.blueprint ?? {}) as Record<string, unknown>;
 
     console.log(bold('Conversational Environment Architect'));
@@ -1639,7 +1645,7 @@ async function architectEnv(
 
     if (provisioned?.id) {
       console.log();
-      success(`Auto-provisioned environment: ${bold(String(provisioned.name ?? ''))} (${provisioned.id})`);
+      success(`Auto-provisioned environment: ${bold(sanitizeTerminalText(String(provisioned.name ?? '')))} (${sanitizeTerminalText(String(provisioned.id))})`);
     }
     return 0;
   } catch (err) {

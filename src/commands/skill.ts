@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizeTerminalText } from '../output/format.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,17 +36,23 @@ export default async function skill(
 
   // --refresh: always fetch the live copy (skip bundled snapshot)
   if (refresh || !existsSync(skillPath)) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await fetch(DEFAULT_SKILL_URL);
+      const res = await fetch(DEFAULT_SKILL_URL, {
+        redirect: 'error',
+        signal: controller.signal
+      });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
-      const body = await res.text();
+      const rawBody = await res.text();
+      const body = sanitizeTerminalText(rawBody);
       process.stdout.write(body);
       if (!body.endsWith('\n')) process.stdout.write('\n');
       return 0;
     } catch (err) {
-      console.error(`hebrah skill: failed to fetch ${DEFAULT_SKILL_URL}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`hebrah skill: failed to fetch ${DEFAULT_SKILL_URL}: ${err instanceof Error ? sanitizeTerminalText(err.message) : String(err)}`);
       if (existsSync(skillPath)) {
         console.error('Falling back to bundled snapshot');
         process.stdout.write(readFileSync(skillPath, 'utf-8'));
@@ -53,6 +60,8 @@ export default async function skill(
       }
       console.error('No bundled snapshot available. Install the latest @hebrah/cli or check your network.');
       return 1;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

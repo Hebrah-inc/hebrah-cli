@@ -28,7 +28,9 @@ import {
   green,
   cyan,
   yellow,
-  formatBytes
+  formatBytes,
+  sanitizeTerminalText,
+  redactSecrets
 } from '../output/format.js';
 import { getArgv } from '../util/args.js';
 import { isPortAvailable, startPgWireProxy } from '../util/pgProxy.js';
@@ -118,7 +120,7 @@ function redactWireguardPrivateKey(configText: string): string {
   );
 }
 
-async function ensureEnvironmentOrigin(
+export async function ensureEnvironmentOrigin(
   explicitId?: string,
   options?: Record<string, unknown>
 ): Promise<void> {
@@ -128,6 +130,16 @@ async function ensureEnvironmentOrigin(
     process.env.HEBRAH_API_URL ||
     api.getBaseUrl() === 'http://localhost:8000'
   ) {
+    return;
+  }
+
+  const savedApiUrl = loadCredentials()?.apiUrl ?? '';
+  const allowLocalFallback =
+    process.env.HEBRAH_ALLOW_LOCAL_FALLBACK === '1' ||
+    savedApiUrl.includes('localhost') ||
+    savedApiUrl.includes('127.0.0.1');
+
+  if (!allowLocalFallback) {
     return;
   }
 
@@ -329,9 +341,10 @@ export default async function dbCommand(
         database: shortDb,
         client: api,
         onQuery: (sqlText, rowCount, durationMs) => {
-          const preview = sqlText.replace(/\s+/g, ' ').slice(0, 90);
+          const safeSql = redactSecrets(sanitizeTerminalText(sqlText));
+          const preview = safeSql.replace(/\s+/g, ' ').slice(0, 90);
           console.log(
-            `  ${dim(`[${new Date().toISOString().slice(11, 19)}]`)} ${cyan('SQL')} ${preview}${sqlText.length > 90 ? '…' : ''} ${dim(`→ ${rowCount} rows (${durationMs}ms)`)}`
+            `  ${dim(`[${new Date().toISOString().slice(11, 19)}]`)} ${cyan('SQL')} ${preview}${safeSql.length > 90 ? '…' : ''} ${dim(`→ ${rowCount} rows (${durationMs}ms)`)}`
           );
         }
       });

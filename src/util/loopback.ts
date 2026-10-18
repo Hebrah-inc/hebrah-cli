@@ -13,6 +13,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { isValidApiKeyFormat } from '../config/credentials.js';
+import { validateApiBaseUrl } from '../api/client.js';
 
 export interface LoopbackAuthResult {
   apiKey: string;
@@ -197,6 +198,11 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
 
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const rawUrl = req.url ?? '/';
+    if (rawUrl.length > 4096) {
+      res.writeHead(414, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('URI Too Long');
+      return;
+    }
     const parsedUrl = new URL(rawUrl, 'http://127.0.0.1');
 
     // Ignore non-GET probes (HEAD/OPTIONS preflight) so browser prefetchers don't disrupt auth
@@ -262,7 +268,15 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
 
     const orgId = (parsedUrl.searchParams.get('orgId') ?? parsedUrl.searchParams.get('org_id'))?.trim() ?? '';
     const orgName = (parsedUrl.searchParams.get('orgName') ?? parsedUrl.searchParams.get('org_name'))?.trim() ?? 'Organization';
-    const apiUrl = (parsedUrl.searchParams.get('apiUrl') ?? parsedUrl.searchParams.get('api_url'))?.trim() || undefined;
+    const rawApiUrl = (parsedUrl.searchParams.get('apiUrl') ?? parsedUrl.searchParams.get('api_url'))?.trim() || undefined;
+    let apiUrl: string | undefined;
+    if (rawApiUrl) {
+      try {
+        apiUrl = validateApiBaseUrl(rawApiUrl);
+      } catch {
+        apiUrl = undefined;
+      }
+    }
     const envId = (parsedUrl.searchParams.get('envId') ?? parsedUrl.searchParams.get('env_id'))?.trim() || undefined;
 
     settled = true;
@@ -279,6 +293,9 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
 
     resolveCallback(result);
   });
+
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 10_000;
 
   await new Promise<void>((resolve, reject) => {
     server.listen(0, '127.0.0.1', () => resolve());

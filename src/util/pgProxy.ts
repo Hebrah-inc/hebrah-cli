@@ -479,13 +479,21 @@ export async function isPortAvailable(
   });
 }
 
+const ALLOWED_PROXY_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+export const MAX_PG_PACKET_BYTES = 16 * 1024 * 1024; // 16 MB ceiling per PostgreSQL frame/buffer
+
 /**
  * Starts a local TCP PostgreSQL v3 wire-protocol server on `127.0.0.1:<port>`.
  */
 export async function startPgWireProxy(
   options: PgProxyOptions
 ): Promise<PgProxyHandle> {
-  const host = options.host ?? '127.0.0.1';
+  const host = (options.host ?? '127.0.0.1').trim();
+  if (!ALLOWED_PROXY_HOSTS.has(host.toLowerCase())) {
+    throw new Error(
+      `Security error: PostgreSQL wire proxy may only bind to loopback addresses (127.0.0.1, localhost, ::1), got "${host}".`
+    );
+  }
   const client = options.client ?? api;
   const databaseName =
     options.database ?? `clinic_${options.envId.replace(/-/g, '_').slice(0, 12)}`;
@@ -554,7 +562,11 @@ export async function startPgWireProxy(
         if (buffer.length < 5) return;
         const msgType = String.fromCharCode(buffer[0]!);
         const msgLen = buffer.readInt32BE(1);
-        if (msgLen < 4 || buffer.length < 1 + msgLen) return;
+        if (msgLen < 4 || msgLen > MAX_PG_PACKET_BYTES) {
+          socket.destroy();
+          return;
+        }
+        if (buffer.length < 1 + msgLen) return;
 
         const payload = buffer.subarray(5, 1 + msgLen);
         buffer = buffer.subarray(1 + msgLen);
@@ -693,6 +705,10 @@ export async function startPgWireProxy(
     };
 
     socket.on('data', (chunk: Buffer) => {
+      if (buffer.length + chunk.length > MAX_PG_PACKET_BYTES) {
+        socket.destroy();
+        return;
+      }
       buffer = Buffer.concat([buffer, chunk]);
       void processBuffer();
     });

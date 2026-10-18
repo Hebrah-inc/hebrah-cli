@@ -448,6 +448,115 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       expect(redacted).not.toContain('SECRET_WG_KEY');
       expect(redacted).toContain('[REDACTED_HEBRAH_TOKEN]');
     });
+
+    it('CLI-F2: strips 8-bit C1 escape sequences (\\x9b, \\x9d, \\x90) and sanitizes kv/info/warn/error while preserving SGR colors', async () => {
+      const { sanitizeTerminalText, kv } = await import('../src/output/format.js');
+      const c1Payload = 'Clinical Note \x9d52;c;ZWNobyBoYWNrZWQ=\x07 \x9b2J \x90Pwned\x9c Safe';
+      const cleaned = sanitizeTerminalText(c1Payload);
+      expect(cleaned).not.toContain('\x9d');
+      expect(cleaned).not.toContain('\x9b');
+      expect(cleaned).not.toContain('\x90');
+      expect(cleaned).toContain('Clinical Note');
+      expect(cleaned).toContain('Safe');
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      kv([['Endpoint', '\x1b[32mhttps://api.hebrah.com\x1b[0m\x1b]52;c;evil\x07\x1b[2J']]);
+      const logged = String(logSpy.mock.calls.at(-1)?.[0] ?? '');
+      expect(logged).not.toContain(']52;');
+      expect(logged).not.toContain('\x1b[2J');
+      expect(logged).toContain('https://api.hebrah.com');
+    });
+  });
+
+  describe('S-8: CLI Pen-Test Hardening (CLI-F1 through CLI-F6)', () => {
+    it('CLI-F1: rejects percent-encoded path traversal (%2e%2e, %2f, %5c, %00) in HebrahApi.request and inspect command', async () => {
+      await expect(api.get('/v1/connections/targets/%2e%2e/admin')).rejects.toThrow(/invalid API request path/i);
+      await expect(api.get('/v1/environments/env_1%2f..%2fsecret')).rejects.toThrow(/invalid API request path/i);
+      await expect(api.get('/v1/environments/env_1%5c..')).rejects.toThrow(/invalid API request path/i);
+      await expect(api.get('/v1/environments/env_1%00.json')).rejects.toThrow(/invalid API request path/i);
+
+      const { default: inspect } = await import('../src/commands/inspect.js');
+      const code = await inspect(['../admin'], { _argv: ['../admin'] });
+      expect(code).toBe(4);
+    });
+
+    it('CLI-F3: refuses to bind local PostgreSQL wire proxy to non-loopback interfaces (0.0.0.0 or LAN IP)', async () => {
+      const { startPgWireProxy } = await import('../src/util/pgProxy.js');
+      await expect(
+        startPgWireProxy({
+          envId: 'env_123',
+          host: '0.0.0.0',
+          port: 15432,
+          database: 'hebrah',
+          client: api
+        })
+      ).rejects.toThrow(/loopback/i);
+
+      await expect(
+        startPgWireProxy({
+          envId: 'env_123',
+          host: '192.168.1.50',
+          port: 15432,
+          database: 'hebrah',
+          client: api
+        })
+      ).rejects.toThrow(/loopback/i);
+    });
+
+    it('CLI-F4: deeply scrubs and redacts secrets in ApiError.body, ApiError.suggestion, and JSON.stringify(err)', async () => {
+      const { ApiError } = await import('../src/api/client.js');
+      const err = new ApiError(
+        'Upstream failure with token hb_live_abcdef1234567890\x1b]52;c;evil\x07',
+        500,
+        {
+          detail: 'Vault failure for enc:v1:deadbeefcafebabe1234',
+          nested: {
+            auth: 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c',
+            wg: 'PrivateKey = SECRET_WIREGUARD_PRIVATE_KEY_VALUE'
+          }
+        },
+        'Retry with key hb_pat_9876543210fedcba'
+      );
+
+      const serialized = JSON.stringify(err);
+      expect(serialized).not.toContain('hb_live_abcdef1234567890');
+      expect(serialized).not.toContain('deadbeefcafebabe1234');
+      expect(serialized).not.toContain('SECRET_WIREGUARD_PRIVATE_KEY_VALUE');
+      expect(serialized).not.toContain('hb_pat_9876543210fedcba');
+      expect(serialized).not.toContain(']52;');
+      expect(serialized).toContain('[REDACTED_HEBRAH_TOKEN]');
+      expect(serialized).toContain('enc:v1:[REDACTED]');
+    });
+
+    it('CLI-F5: does not silently downgrade to cleartext http://localhost:8000 when using production origin', async () => {
+      const { ensureEnvironmentOrigin } = await import('../src/commands/db.js');
+      const prevVitest = process.env.VITEST;
+      const prevAllow = process.env.HEBRAH_ALLOW_LOCAL_FALLBACK;
+      try {
+        delete process.env.VITEST;
+        delete process.env.HEBRAH_ALLOW_LOCAL_FALLBACK;
+        saveCredentials({
+          apiKey: 'hb_live_prod_secret_token',
+          apiUrl: 'https://api.hebrah.com'
+        });
+        api.setBaseUrl('https://api.hebrah.com');
+
+        const getSpy = vi.spyOn(api, 'get').mockRejectedValue(new Error('Network error'));
+        await ensureEnvironmentOrigin('env_123', {});
+
+        // Should not have probed or switched to http://localhost:8000
+        expect(api.getBaseUrl()).toBe('https://api.hebrah.com');
+        expect(getSpy).not.toHaveBeenCalled();
+      } finally {
+        process.env.VITEST = prevVitest;
+        if (prevAllow === undefined) {
+          delete process.env.HEBRAH_ALLOW_LOCAL_FALLBACK;
+        } else {
+          process.env.HEBRAH_ALLOW_LOCAL_FALLBACK = prevAllow;
+        }
+      }
+    });
   });
 });
+
 

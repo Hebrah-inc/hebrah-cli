@@ -171,6 +171,7 @@ Pricing: https://hebrah.com/pricing
 
 main().then((code) => process.exit(code)).catch((err) => {
   console.error('hebrah: fatal error');
-  console.error(err);
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  console.error(redactSecrets(sanitizeTerminalText(rawMsg)));
   process.exit(4);
 });
