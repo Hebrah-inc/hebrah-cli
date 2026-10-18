@@ -19,9 +19,9 @@ function loadPackageVersion(): string {
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
-    return pkg.version || '0.4.2';
+    return pkg.version || '0.4.3';
   } catch {
-    return '0.4.2';
+    return '0.4.3';
   }
 }
 

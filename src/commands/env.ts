@@ -39,7 +39,7 @@ import { writeFileSync, existsSync, lstatSync, chmodSync } from 'node:fs';
 import { hostname, platform } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { api, safeId } from '../api/client.js';
+import { api, safeId, CLI_VERSION } from '../api/client.js';
 import { loadCredentials, updateCredentials } from '../config/credentials.js';
 import { normalizeWireguardConfig } from './db.js';
 import {
@@ -463,7 +463,7 @@ async function connectEnv(
     try {
       detail = await api.post<EnvironmentDetail>(`/v1/environments/${cleanId}/agents/connect`, {
         agent_name: agentName,
-        cli_version: '0.4.2',
+        cli_version: CLI_VERSION,
         platform: `${platform()}-${hostname()}`
       });
     } catch {
