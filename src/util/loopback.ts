@@ -13,7 +13,8 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { isValidApiKeyFormat } from '../config/credentials.js';
-import { validateApiBaseUrl } from '../api/client.js';
+import { safeId, validateApiBaseUrl } from '../api/client.js';
+import { sanitizeTerminalText } from '../output/format.js';
 
 export interface LoopbackAuthResult {
   apiKey: string;
@@ -30,6 +31,8 @@ export interface LoopbackAuthServer {
   close(): void;
 }
 
+const ALLOWED_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
 const SECURITY_HEADERS: Record<string, string> = {
   'Content-Type': 'text/html; charset=utf-8',
   'Cache-Control': 'no-store, no-cache, must-revalidate, private',
@@ -39,6 +42,18 @@ const SECURITY_HEADERS: Record<string, string> = {
   'X-Frame-Options': 'DENY',
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
 };
+
+function isValidLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  if (!hostHeader) return true;
+  const trimmed = hostHeader.trim().toLowerCase();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(`http://${trimmed}`);
+    return ALLOWED_LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 
 function constantTimeStateMatch(incoming: string | null, expected: string): boolean {
   if (!incoming || typeof incoming !== 'string') return false;
@@ -197,6 +212,38 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
   });
 
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    // 1. DNS Rebinding guard: reject non-loopback Host headers without aborting the listener
+    if (!isValidLoopbackHostHeader(req.headers.host)) {
+      res.writeHead(403, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Forbidden: invalid Host header (DNS rebinding protection)');
+      return;
+    }
+
+    // 2. Cross-Origin Subresource DoS guard: block browser <img>/<script>/<iframe>/fetch(no-cors) probes
+    const secFetchMode = req.headers['sec-fetch-mode'];
+    const secFetchDest = req.headers['sec-fetch-dest'];
+    const secFetchSite = req.headers['sec-fetch-site'];
+    const blockedDests = new Set([
+      'image',
+      'script',
+      'iframe',
+      'frame',
+      'style',
+      'audio',
+      'video',
+      'embed',
+      'object'
+    ]);
+    if (
+      secFetchMode === 'no-cors' ||
+      (typeof secFetchDest === 'string' && blockedDests.has(secFetchDest)) ||
+      (secFetchSite === 'cross-site' && secFetchMode !== 'navigate')
+    ) {
+      res.writeHead(403, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Forbidden: cross-origin subresource requests are not permitted');
+      return;
+    }
+
     const rawUrl = req.url ?? '/';
     if (rawUrl.length > 4096) {
       res.writeHead(414, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
@@ -230,17 +277,24 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
       return;
     }
 
+    const incomingState = parsedUrl.searchParams.get('state');
     const errorParam = parsedUrl.searchParams.get('error');
     if (errorParam) {
+      if (incomingState !== null && !constantTimeStateMatch(incomingState, state)) {
+        res.writeHead(400, SECURITY_HEADERS);
+        res.end(errorHtml('Invalid State', 'CSRF verification failed. The state parameter did not match.'));
+        return;
+      }
       settled = true;
-      const desc = parsedUrl.searchParams.get('error_description') || errorParam;
+      const desc = sanitizeTerminalText(
+        parsedUrl.searchParams.get('error_description') || errorParam
+      ).slice(0, 256);
       res.writeHead(400, SECURITY_HEADERS);
       res.end(errorHtml('Authorization Denied', desc));
       rejectCallback(new Error(`Authorization failed: ${desc}`));
       return;
     }
 
-    const incomingState = parsedUrl.searchParams.get('state');
     const rawKey = (parsedUrl.searchParams.get('apiKey') ?? parsedUrl.searchParams.get('key'))?.trim();
 
     // If a blank probe hits /callback with neither state nor apiKey, return 400 without killing listener
@@ -266,8 +320,12 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
       return;
     }
 
-    const orgId = (parsedUrl.searchParams.get('orgId') ?? parsedUrl.searchParams.get('org_id'))?.trim() ?? '';
-    const orgName = (parsedUrl.searchParams.get('orgName') ?? parsedUrl.searchParams.get('org_name'))?.trim() ?? 'Organization';
+    const orgId = sanitizeTerminalText(
+      (parsedUrl.searchParams.get('orgId') ?? parsedUrl.searchParams.get('org_id'))?.trim() ?? ''
+    ).slice(0, 128);
+    const orgName = sanitizeTerminalText(
+      (parsedUrl.searchParams.get('orgName') ?? parsedUrl.searchParams.get('org_name'))?.trim() ?? 'Organization'
+    ).slice(0, 128);
     const rawApiUrl = (parsedUrl.searchParams.get('apiUrl') ?? parsedUrl.searchParams.get('api_url'))?.trim() || undefined;
     let apiUrl: string | undefined;
     if (rawApiUrl) {
@@ -277,7 +335,16 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
         apiUrl = undefined;
       }
     }
-    const envId = (parsedUrl.searchParams.get('envId') ?? parsedUrl.searchParams.get('env_id'))?.trim() || undefined;
+    const rawEnvId = (parsedUrl.searchParams.get('envId') ?? parsedUrl.searchParams.get('env_id'))?.trim() || undefined;
+    let envId: string | undefined;
+    if (rawEnvId) {
+      try {
+        safeId(rawEnvId, 'envId');
+        envId = rawEnvId;
+      } catch {
+        envId = undefined;
+      }
+    }
 
     settled = true;
     res.writeHead(200, SECURITY_HEADERS);

@@ -22,11 +22,13 @@ import { randomBytes } from 'node:crypto';
 
 export const ALLOWED_KEY_PREFIXES = ['hb_conn_', 'hb_pat_', 'hb_live_', 'hb_test_'] as const;
 
+const STRICT_API_KEY_RE = /^hb_(?:conn|pat|live|test)_[A-Za-z0-9._-]{8,256}$/;
+const MAX_CREDENTIALS_FILE_BYTES = 65_536;
+
 export function isValidApiKeyFormat(key: string | undefined | null): key is string {
   if (!key || typeof key !== 'string') return false;
   const trimmed = key.trim();
-  if (trimmed.length < 12 || /[\s\x00-\x1f\x7f]/.test(trimmed)) return false;
-  return ALLOWED_KEY_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  return STRICT_API_KEY_RE.test(trimmed);
 }
 
 export function maskApiKey(key: string): string {
@@ -86,6 +88,12 @@ export function loadCredentials(): Credentials | null {
     if (st.isSymbolicLink()) {
       throw new Error(`Security error: refusing to read symbolic link at ${credPath}`);
     }
+    if (!st.isFile()) {
+      throw new Error(`Security error: credentials path ${credPath} is not a regular file`);
+    }
+    if (st.size > MAX_CREDENTIALS_FILE_BYTES) {
+      throw new Error(`Security error: credentials file at ${credPath} exceeds maximum allowed size`);
+    }
     if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) {
       try {
         chmodSync(credPath, 0o600);
@@ -93,7 +101,16 @@ export function loadCredentials(): Credentials | null {
         // ignore if read-only fs
       }
     }
-    return JSON.parse(readFileSync(credPath, 'utf-8'));
+    const parsed: unknown = JSON.parse(readFileSync(credPath, 'utf-8'));
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed) ||
+      typeof (parsed as Record<string, unknown>).apiKey !== 'string'
+    ) {
+      return null;
+    }
+    return parsed as Credentials;
   } catch (err: any) {
     if (err?.message?.startsWith('Security error:')) {
       throw err;

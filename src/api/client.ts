@@ -19,9 +19,9 @@ function loadPackageVersion(): string {
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
-    return pkg.version || '0.4.4';
+    return pkg.version || '0.4.5';
   } catch {
-    return '0.4.4';
+    return '0.4.5';
   }
 }
 
@@ -121,8 +121,28 @@ export function safeId(rawId: string, label = 'id'): string {
   return encodeURIComponent(trimmed);
 }
 
+const BLOCKED_METADATA_HOSTS = new Set([
+  '169.254.169.254',
+  'metadata.google.internal',
+  'metadata.goog',
+  'metadata',
+  '100.100.100.200',
+  '[fd00:ec2::254]',
+  'fd00:ec2::254'
+]);
+
+const MAX_API_RESPONSE_BYTES = 50 * 1024 * 1024; // 50 MB ceiling
+
+export function isCloudMetadataHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (BLOCKED_METADATA_HOSTS.has(host)) return true;
+  if (host.startsWith('169.254.')) return true;
+  return false;
+}
+
 function isTrustedHebrahHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
+  if (isCloudMetadataHost(host)) return false;
   if (LOOPBACK_HOSTS.has(host)) return true;
   if (host === 'hebrah.com' || host.endsWith('.hebrah.com')) return true;
   if (/^hebrah-[a-z0-9-]+(?:\.[a-z0-9-]+)?\.run\.app$/.test(host)) return true;
@@ -155,6 +175,12 @@ export function validateApiBaseUrl(rawUrl: string): string {
   }
 
   const host = parsed.hostname.toLowerCase();
+  if (isCloudMetadataHost(host)) {
+    throw new Error(
+      `Security error: cloud metadata or link-local host "${host}" is strictly prohibited.`
+    );
+  }
+
   const isLoopback = LOOPBACK_HOSTS.has(host);
 
   if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopback)) {
@@ -330,7 +356,15 @@ class HebrahApi {
         signal: controller.signal
       });
 
+      const contentLength = Number(response.headers?.get?.('content-length') ?? 0);
+      if (Number.isFinite(contentLength) && contentLength > MAX_API_RESPONSE_BYTES) {
+        throw new Error(`Security error: API response exceeds maximum allowed size (${MAX_API_RESPONSE_BYTES} bytes).`);
+      }
+
       const responseBody = await response.text();
+      if (Buffer.byteLength(responseBody, 'utf8') > MAX_API_RESPONSE_BYTES) {
+        throw new Error(`Security error: API response exceeds maximum allowed size (${MAX_API_RESPONSE_BYTES} bytes).`);
+      }
       let parsed: unknown;
       try {
         parsed = responseBody ? JSON.parse(responseBody) : null;

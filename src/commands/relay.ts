@@ -141,7 +141,7 @@ async function enroll(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -276,7 +276,7 @@ async function listRelays(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -333,7 +333,7 @@ async function relayStatus(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const relayId = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!relayId) {
     error('hebrah relay status: relay_id required');
@@ -402,7 +402,7 @@ async function revokeRelay(
   args: string[],
   options: Record<string, unknown>
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? args;
+  const argv = getArgv(options, args);
   const relayId = argv.find((a) => !a.startsWith('-')) ?? args[0];
   if (!relayId) {
     error('hebrah relay revoke: relay_id required');

@@ -10,6 +10,7 @@
 
 import * as net from 'node:net';
 import { api, safeId } from '../api/client.js';
+import { redactSecrets, sanitizeTerminalText } from '../output/format.js';
 
 export type PgProxyClient = typeof api;
 
@@ -58,7 +59,8 @@ function buildBackendPacket(typeChar: string, payload: Buffer): Buffer {
 }
 
 function cstr(value: string): Buffer {
-  return Buffer.from(`${value}\0`, 'utf8');
+  const safe = String(value).replace(/\0/g, '');
+  return Buffer.from(`${safe}\0`, 'utf8');
 }
 
 function buildParameterStatus(name: string, value: string): Buffer {
@@ -160,15 +162,17 @@ function buildParameterDescription(paramCount = 0): Buffer {
 }
 
 function buildErrorResponse(message: string, code = '42000'): Buffer {
+  const safeMessage = redactSecrets(sanitizeTerminalText(message));
+  const safeCode = sanitizeTerminalText(code).slice(0, 5) || '42000';
   const parts = [
     Buffer.from('S', 'ascii'),
     cstr('ERROR'),
     Buffer.from('V', 'ascii'),
     cstr('ERROR'),
     Buffer.from('C', 'ascii'),
-    cstr(code),
+    cstr(safeCode),
     Buffer.from('M', 'ascii'),
-    cstr(message),
+    cstr(safeMessage),
     Buffer.from('\0', 'ascii')
   ];
   return buildBackendPacket('E', Buffer.concat(parts));
@@ -498,17 +502,39 @@ export async function startPgWireProxy(
   const databaseName =
     options.database ?? `clinic_${options.envId.replace(/-/g, '_').slice(0, 12)}`;
 
+  const activeSockets = new Set<net.Socket>();
+
   const server = net.createServer((socket) => {
+    activeSockets.add(socket);
+    socket.on('close', () => {
+      activeSockets.delete(socket);
+    });
+
     let startupCompleted = false;
     let buffer = Buffer.alloc(0);
     let boundStatementSql = '';
+    let isProcessing = false;
+
+    socket.setTimeout(300_000, () => {
+      socket.destroy();
+    });
 
     socket.on('error', (err) => {
       options.onError?.(err);
     });
 
+    const drainBuffer = async (): Promise<void> => {
+      if (isProcessing) return;
+      isProcessing = true;
+      try {
+        await processBuffer();
+      } finally {
+        isProcessing = false;
+      }
+    };
+
     const processBuffer = async (): Promise<void> => {
-      while (buffer.length > 0) {
+      while (buffer.length > 0 && !socket.destroyed) {
         if (!startupCompleted) {
           if (buffer.length < 8) return;
           const packetLen = buffer.readInt32BE(0);
@@ -710,9 +736,11 @@ export async function startPgWireProxy(
         return;
       }
       buffer = Buffer.concat([buffer, chunk]);
-      void processBuffer();
+      void drainBuffer();
     });
   });
+
+  server.maxConnections = 32;
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -731,6 +759,10 @@ export async function startPgWireProxy(
     port: actualPort,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        for (const s of activeSockets) {
+          s.destroy();
+        }
+        activeSockets.clear();
         server.close((err) => (err ? reject(err) : resolve()));
       })
   };

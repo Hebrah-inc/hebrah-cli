@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util';
 import { loadCredentials, maskApiKey } from '../config/credentials.js';
 import { api } from '../api/client.js';
 import { kv, json, error } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 interface UsageResponse {
   orgId: string;
@@ -21,7 +22,7 @@ interface UsageResponse {
 
 export default async function whoami(
   _args: string[],
-  options: Record<string, unknown>
+  options: Record<string, unknown> = {}
 ): Promise<number> {
   const creds = loadCredentials();
   const envKey = process.env.HEBRAH_API_KEY?.trim();
@@ -30,7 +31,7 @@ export default async function whoami(
     return 2;
   }
 
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {

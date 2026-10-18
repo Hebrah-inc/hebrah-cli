@@ -28,6 +28,7 @@ import {
 import { success, error, info, bold, dim, cyan, kv, json, sanitizeTerminalText } from '../output/format.js';
 import { startLoopbackAuth, type LoopbackAuthResult, type LoopbackAuthServer } from '../util/loopback.js';
 import { openBrowser, validateBrowserUrl } from '../util/browser.js';
+import { getArgv } from '../util/args.js';
 import type { EnvironmentDetail } from './env.js';
 
 interface DeviceCodeResponse {
@@ -198,9 +199,9 @@ async function loginHeadlessDeviceFlow(timeoutMs: number): Promise<{
 
 export default async function login(
   _args: string[],
-  options: Record<string, unknown>
+  options: Record<string, unknown> = {}
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -234,10 +235,14 @@ export default async function login(
   const flagAppUrl = values['app-url'] as string | undefined;
   let flagApiUrl = values['api-url'] as string | undefined;
   let targetEnvId = (values['env-id'] as string | undefined) ?? process.env.HEBRAH_ENV_ID;
-  const agentName = (values['agent-name'] as string | undefined) || `cli-agent-${hostname()}`;
+  const agentName = sanitizeTerminalText((values['agent-name'] as string | undefined) || `cli-agent-${hostname()}`);
 
   let appUrl: string;
   try {
+    if (targetEnvId) {
+      safeId(targetEnvId, 'env-id');
+      targetEnvId = targetEnvId.trim();
+    }
     if (!flagApiUrl && flagAppUrl) {
       flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
     }

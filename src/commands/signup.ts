@@ -8,9 +8,10 @@
 // Returns 0 on success (saves credentials), 1 on user error, 4 on server error.
 
 import { parseArgs } from 'node:util';
-import { api, ApiError, inferApiUrlFromAppUrl, validateApiBaseUrl } from '../api/client.js';
+import { api, ApiError, inferApiUrlFromAppUrl, safeId, validateApiBaseUrl } from '../api/client.js';
 import { saveCredentials, maskApiKey } from '../config/credentials.js';
-import { json, success, info, error, bold } from '../output/format.js';
+import { json, success, info, error, bold, sanitizeTerminalText } from '../output/format.js';
+import { validateBrowserUrl } from '../util/browser.js';
 import { getArgv } from '../util/args.js';
 
 interface SignupResponse {
@@ -49,7 +50,12 @@ export default async function signup(
 
   let flagAppUrl = values['app-url'] as string | undefined;
   let flagApiUrl = values['api-url'] as string | undefined;
+  let defaultEnvId = values['env-id'] as string | undefined;
   try {
+    if (defaultEnvId) {
+      safeId(defaultEnvId, 'env-id');
+      defaultEnvId = defaultEnvId.trim();
+    }
     if (flagAppUrl) {
       flagAppUrl = validateApiBaseUrl(flagAppUrl);
     }
@@ -120,18 +126,39 @@ export default async function signup(
     const resolvedApiUrl = api.getBaseUrl();
     const keyPrefix = maskApiKey(result.apiKey);
 
+    let safeClaimUrl: string | undefined;
+    if (result.claimUrl) {
+      try {
+        safeClaimUrl = validateBrowserUrl(sanitizeTerminalText(result.claimUrl));
+      } catch {
+        safeClaimUrl = undefined;
+      }
+    }
+
+    let safeMcpUrl: string | undefined;
+    if (result.mcpEndpointUrl) {
+      try {
+        safeMcpUrl = validateBrowserUrl(sanitizeTerminalText(result.mcpEndpointUrl));
+      } catch {
+        safeMcpUrl = undefined;
+      }
+    }
+
+    const safeOrgId = sanitizeTerminalText(result.orgId);
+    const safeOrgName = sanitizeTerminalText(result.orgName);
+
     // Persist credentials locally
     saveCredentials({
       apiKey: result.apiKey,
-      orgId: result.orgId,
-      orgName: result.orgName,
+      orgId: safeOrgId,
+      orgName: safeOrgName,
       keyPrefix,
       createdAt: new Date().toISOString(),
       apiUrl: resolvedApiUrl,
       appUrl: flagAppUrl,
-      defaultEnvId: values['env-id'] as string | undefined,
-      claimUrl: result.claimUrl,
-      mcpEndpointUrl: result.mcpEndpointUrl,
+      defaultEnvId,
+      claimUrl: safeClaimUrl,
+      mcpEndpointUrl: safeMcpUrl,
       trial: {
         credits: result.trial.credits,
         expiresAt
@@ -143,20 +170,24 @@ export default async function signup(
       void _rawKey;
       json({
         ...safeResult,
+        orgId: safeOrgId,
+        orgName: safeOrgName,
+        claimUrl: safeClaimUrl,
+        mcpEndpointUrl: safeMcpUrl,
         keyPrefix
       });
     } else {
-      success(`Account created: ${bold(result.orgName)} (${result.orgId})`);
+      success(`Account created: ${bold(safeOrgName)} (${safeOrgId})`);
       info(`API key saved to ~/.hebrah/credentials (mode 0600)`);
       info(`API Endpoint: ${resolvedApiUrl}`);
       info(`Trial: ${result.trial.credits.queries} queries, ${(result.trial.credits.egressBytes / 1e9).toFixed(2)} GB egress`);
       info(`Trial expires: ${expiresAt}`);
-      if (result.mcpEndpointUrl) {
-        info(`MCP endpoint: ${result.mcpEndpointUrl}`);
+      if (safeMcpUrl) {
+        info(`MCP endpoint: ${safeMcpUrl}`);
       }
-      if (result.claimUrl) {
+      if (safeClaimUrl) {
         console.log();
-        info(`Claim URL: ${bold(result.claimUrl)}`);
+        info(`Claim URL: ${bold(safeClaimUrl)}`);
         info(`Share this claim link with your human team member to claim billing ownership and invite team members.`);
       }
       console.log();

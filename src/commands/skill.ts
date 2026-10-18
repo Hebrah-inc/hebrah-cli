@@ -10,21 +10,22 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sanitizeTerminalText } from '../output/format.js';
+import { error, sanitizeTerminalText } from '../output/format.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_SKILL_URL = 'https://hebrah.com/SKILL.md';
+const MAX_SKILL_BYTES = 2 * 1024 * 1024; // 2 MB ceiling
 
 export default async function skill(
-  _args: string[],
-  options: Record<string, unknown>
+  _args: string[] = [],
+  options: Record<string, unknown> = {}
 ): Promise<number> {
   // Options are forwarded from the top-level parser (index.ts) which uses
   // strict: false, so per-command flags like --path and --refresh flow in
-  // here directly. No need to re-parse argv.
-  const showPath = options.path === true;
-  const refresh = options.refresh === true;
+  // here directly. Also accept flags in _args for direct programmatic calls.
+  const showPath = options.path === true || _args.includes('--path');
+  const refresh = options.refresh === true || _args.includes('--refresh');
 
   // Look for bundled SKILL.md (shipped with the npm package)
   const skillPath = join(__dirname, '..', '..', 'skill.md');
@@ -46,25 +47,32 @@ export default async function skill(
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
+      const contentLen = Number(res.headers?.get?.('content-length') ?? 0);
+      if (Number.isFinite(contentLen) && contentLen > MAX_SKILL_BYTES) {
+        throw new Error(`SKILL.md response exceeds maximum size (${MAX_SKILL_BYTES} bytes)`);
+      }
       const rawBody = await res.text();
+      if (Buffer.byteLength(rawBody, 'utf8') > MAX_SKILL_BYTES) {
+        throw new Error(`SKILL.md response exceeds maximum size (${MAX_SKILL_BYTES} bytes)`);
+      }
       const body = sanitizeTerminalText(rawBody);
       process.stdout.write(body);
       if (!body.endsWith('\n')) process.stdout.write('\n');
       return 0;
     } catch (err) {
-      console.error(`hebrah skill: failed to fetch ${DEFAULT_SKILL_URL}: ${err instanceof Error ? sanitizeTerminalText(err.message) : String(err)}`);
+      error(`hebrah skill: failed to fetch ${DEFAULT_SKILL_URL}: ${err instanceof Error ? err.message : String(err)}`);
       if (existsSync(skillPath)) {
-        console.error('Falling back to bundled snapshot');
-        process.stdout.write(readFileSync(skillPath, 'utf-8'));
+        error('Falling back to bundled snapshot');
+        process.stdout.write(sanitizeTerminalText(readFileSync(skillPath, 'utf-8')));
         return 0;
       }
-      console.error('No bundled snapshot available. Install the latest @hebrah/cli or check your network.');
+      error('No bundled snapshot available. Install the latest @hebrah/cli or check your network.');
       return 1;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  process.stdout.write(readFileSync(skillPath, 'utf-8'));
+  process.stdout.write(sanitizeTerminalText(readFileSync(skillPath, 'utf-8')));
   return 0;
 }

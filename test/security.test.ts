@@ -591,7 +591,7 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       expect(resolveAppUrl('http://localhost:3020/')).toBe('http://localhost:3020');
 
       expect(() => resolveAppUrl('http://evil.example.com')).toThrow(/cleartext HTTP/i);
-      expect(() => resolveAppUrl('https://169.254.169.254')).toThrow(/untrusted Hebrah host/i);
+      expect(() => resolveAppUrl('https://169.254.169.254')).toThrow(/cloud metadata or link-local host|untrusted Hebrah host/i);
       expect(() => resolveAppUrl('https://admin:secret@app.hebrah.com')).toThrow(
         /embedded credentials/i
       );
@@ -719,5 +719,281 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       expect(allLogs).not.toContain('undefined');
     });
   });
+
+  describe('S-10: Third-Pass Pen-Test Hardening (Loopback DNS Rebinding, PG Wire Mutex, Cloud Metadata SSRF, Credentials & Skill Bounds)', () => {
+    it('blocks DNS rebinding (Host header mismatch) and cross-origin subresource probes (Sec-Fetch-Mode) on loopback listener without killing the session', async () => {
+      const { startLoopbackAuth } = await import('../src/util/loopback.js');
+      const net = await import('node:net');
+      const listener = await startLoopbackAuth();
+      const waitPromise = listener.waitForCallback(10_000);
+      const callbackUrl = `http://127.0.0.1:${listener.port}/callback`;
+
+      try {
+        // 1. Send a raw HTTP request with a spoofed DNS-rebound Host header (evil.com)
+        const sendRawHttp = (rawRequest: string): Promise<string> =>
+          new Promise((resolve, reject) => {
+            const client = net.createConnection({ host: '127.0.0.1', port: listener.port }, () => {
+              client.write(rawRequest);
+            });
+            let data = '';
+            client.on('data', (chunk) => {
+              data += chunk.toString('utf8');
+            });
+            client.on('end', () => resolve(data));
+            client.on('error', reject);
+          });
+
+        const dnsRebindResp = await sendRawHttp(
+          `GET /callback?apiKey=hb_pat_validkey12345678&state=${listener.state} HTTP/1.1\r\nHost: evil.rebind.attacker.com:${listener.port}\r\nConnection: close\r\n\r\n`,
+        );
+        expect(dnsRebindResp).toContain('403 Forbidden');
+        expect(dnsRebindResp).toMatch(/invalid Host header/i);
+
+        // 2. Send a cross-origin subresource probe (Sec-Fetch-Mode: no-cors, Sec-Fetch-Dest: image)
+        const subresourceResp = await sendRawHttp(
+          `GET /callback?error=access_denied HTTP/1.1\r\nHost: 127.0.0.1:${listener.port}\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: image\r\nConnection: close\r\n\r\n`,
+        );
+        expect(subresourceResp).toContain('403 Forbidden');
+        expect(subresourceResp).toMatch(/cross-origin subresource requests are not permitted/i);
+
+        // 3. Send an unauthenticated error callback with a forged state -> must NOT kill the listener!
+        const forgedErrorResp = await fetch(
+          `${callbackUrl}?error=access_denied&state=wrong-state-probe`,
+        );
+        expect(forgedErrorResp.status).toBe(400);
+
+        // 4. Verify the legitimate browser navigation callback still succeeds and sanitizes orgName + validates envId
+        const validResp = await fetch(
+          `${callbackUrl}?apiKey=hb_pat_validkey12345678&state=${listener.state}&orgId=org_123&orgName=${encodeURIComponent('Acme\x1b[31mHealth')}&envId=${encodeURIComponent('../bad')}`,
+        );
+        expect(validResp.status).toBe(200);
+
+        const result = await waitPromise;
+        expect(result.apiKey).toBe('hb_pat_validkey12345678');
+        expect(result.orgId).toBe('org_123');
+        expect(result.orgName).toBe('AcmeHealth');
+        expect(result.envId).toBeUndefined(); // Unsafe env_id rejected
+      } finally {
+        listener.close();
+      }
+    });
+
+    it('serializes concurrent PG wire proxy packets (async mutex), strips embedded null bytes, and redacts secrets in ErrorResponse', async () => {
+      const { startPgWireProxy } = await import('../src/util/pgProxy.js');
+      const net = await import('node:net');
+
+      let activeExecutions = 0;
+      let maxConcurrentExecutions = 0;
+
+      const mockClient = {
+        post: async (_path: string, body: unknown) => {
+          const sql = String((body as { sql?: string })?.sql ?? '');
+          activeExecutions++;
+          maxConcurrentExecutions = Math.max(maxConcurrentExecutions, activeExecutions);
+          await new Promise((r) => setTimeout(r, 40));
+          activeExecutions--;
+          if (sql.includes('FAIL_WITH_SECRET')) {
+            throw new Error('Upstream failed with token hb_live_secretleak1234567890');
+          }
+          return {
+            columns: ['col\0injected'],
+            rows: [{ 'col\0injected': 'val\0injected' }],
+            rowCount: 1,
+          };
+        },
+      };
+
+      const handle = await startPgWireProxy({
+        envId: 'env_s10_test',
+        port: 0,
+        client: mockClient as never,
+      });
+
+      try {
+        const client = net.createConnection({ host: handle.host, port: handle.port });
+        await new Promise<void>((resolve, reject) => {
+          client.once('connect', () => resolve());
+          client.once('error', reject);
+        });
+
+        // Wait for initial ReadyForQuery ('Z\0\0\0\x05I') after StartupMessage
+        const readyPromise = new Promise<void>((resolve) => {
+          let startupBuf = Buffer.alloc(0);
+          const onData = (chunk: Buffer) => {
+            startupBuf = Buffer.concat([startupBuf, chunk]);
+            for (let i = 0; i <= startupBuf.length - 6; i++) {
+              if (
+                startupBuf[i] === 0x5a &&
+                startupBuf.readInt32BE(i + 1) === 5 &&
+                startupBuf[i + 5] === 0x49
+              ) {
+                client.off('data', onData);
+                resolve();
+                return;
+              }
+            }
+          };
+          client.on('data', onData);
+        });
+
+        // StartupMessage (v3.0 = 196608)
+        const userBuf = Buffer.from('user\0hebrah\0database\0hebrah\0\0', 'utf8');
+        const startup = Buffer.alloc(8 + userBuf.length);
+        startup.writeInt32BE(8 + userBuf.length, 0);
+        startup.writeInt32BE(196608, 4);
+        userBuf.copy(startup, 8);
+        client.write(startup);
+
+        await readyPromise;
+
+        // Build two Simple Query ('Q') messages that hit mockClient.post and send them across two TCP writes
+        const makeQueryMsg = (sql: string) => {
+          const qBuf = Buffer.from(`${sql}\0`, 'utf8');
+          const msg = Buffer.alloc(5 + qBuf.length);
+          msg[0] = 0x51; // 'Q'
+          msg.writeInt32BE(4 + qBuf.length, 1);
+          qBuf.copy(msg, 5);
+          return msg;
+        };
+
+        const donePromise = new Promise<Buffer>((resolve) => {
+          let fullBuf = Buffer.alloc(0);
+          client.on('data', (chunk: Buffer) => {
+            fullBuf = Buffer.concat([fullBuf, chunk]);
+            let readyCount = 0;
+            for (let i = 0; i <= fullBuf.length - 6; i++) {
+              if (
+                fullBuf[i] === 0x5a &&
+                fullBuf.readInt32BE(i + 1) === 5 &&
+                fullBuf[i + 5] === 0x49
+              ) {
+                readyCount++;
+              }
+            }
+            if (readyCount >= 2) {
+              resolve(fullBuf);
+            }
+          });
+        });
+
+        client.write(makeQueryMsg('SELECT id FROM patients'));
+        setTimeout(() => {
+          client.write(makeQueryMsg('SELECT FAIL_WITH_SECRET FROM patients'));
+        }, 5);
+
+        const rawResponse = await donePromise;
+        const responseText = rawResponse.toString('utf8');
+
+        // Verify queries were serialized by drainBuffer (never ran concurrently)
+        expect(maxConcurrentExecutions).toBe(1);
+        // Verify null-byte stripping in column name
+        expect(responseText).toContain('colinjected');
+        // Verify secret redaction in ErrorResponse
+        expect(responseText).not.toContain('hb_live_secretleak1234567890');
+        expect(responseText).toContain('[REDACTED_HEBRAH_TOKEN]');
+
+        client.destroy();
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it('blocks cloud metadata SSRF endpoints even when HEBRAH_ALLOW_CUSTOM_HOST=1 is set', () => {
+      const prevCustomHost = process.env.HEBRAH_ALLOW_CUSTOM_HOST;
+      try {
+        process.env.HEBRAH_ALLOW_CUSTOM_HOST = '1';
+
+        expect(() => validateApiBaseUrl('https://169.254.169.254/latest/meta-data')).toThrow(
+          /cloud metadata or link-local host/i,
+        );
+        expect(() => validateApiBaseUrl('https://metadata.google.internal/computeMetadata/v1')).toThrow(
+          /cloud metadata or link-local host/i,
+        );
+        expect(() => validateApiBaseUrl('https://100.100.100.200/latest/meta-data')).toThrow(
+          /cloud metadata or link-local host/i,
+        );
+        expect(() => validateApiBaseUrl('https://[fd00:ec2::254]/latest/meta-data')).toThrow(
+          /cloud metadata or link-local host/i,
+        );
+        expect(() => validateBrowserUrl('https://169.254.169.254/latest/meta-data')).toThrow(
+          /cloud metadata or link-local host/i,
+        );
+      } finally {
+        if (prevCustomHost === undefined) {
+          delete process.env.HEBRAH_ALLOW_CUSTOM_HOST;
+        } else {
+          process.env.HEBRAH_ALLOW_CUSTOM_HOST = prevCustomHost;
+        }
+      }
+    });
+
+    it('enforces 50 MB API response size cap in HebrahApi', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response('{}', {
+          status: 200,
+          headers: { 'content-length': String(60 * 1024 * 1024) },
+        }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      api.setBaseUrl('https://api.hebrah.com');
+      api.setApiKey('hb_pat_validkey12345678');
+      await expect(api.get('/v1/agent/whoami')).rejects.toThrow(/exceeds maximum allowed size/i);
+    });
+
+    it('enforces strict API key character whitelist and 64 KB size cap in loadCredentials', () => {
+      expect(isValidApiKeyFormat('hb_pat_validKey_123-abc.456')).toBe(true);
+      expect(isValidApiKeyFormat('hb_live_short')).toBe(false);
+      expect(isValidApiKeyFormat('hb_pat_invalid/slash/key12345')).toBe(false);
+      expect(isValidApiKeyFormat('hb_pat_invalid?query=1&x=2345')).toBe(false);
+
+      // Write an oversized credentials.json (> 64 KB) and verify loadCredentials rejects it
+      const credPath = credentialsPath();
+      writeFileSync(
+        credPath,
+        JSON.stringify({ apiKey: 'hb_pat_validKey12345678', padding: 'A'.repeat(70_000) }),
+        { mode: 0o600 },
+      );
+      expect(() => loadCredentials()).toThrow(/exceeds maximum allowed size/i);
+    });
+
+    it('enforces 2 MB size cap and secret redaction in hebrah skill command', async () => {
+      const skillCmd = (await import('../src/commands/skill.js')).default;
+      const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response('oversized', {
+          status: 200,
+          headers: { 'content-length': String(5 * 1024 * 1024) },
+        }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      try {
+        // Falls back to bundled skill.md (code 0) after logging the 2 MB size cap error via error()
+        const code = await skillCmd(['--refresh'], { refresh: true });
+        expect(code).toBe(0);
+        const errOut = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(errOut).toContain('SKILL.md response exceeds maximum size');
+      } finally {
+        writeSpy.mockRestore();
+      }
+    });
+
+    it('rejects path-traversal --env-id in signup and login commands before making network calls', async () => {
+      const signupCmd = (await import('../src/commands/signup.js')).default;
+      const loginCmd = (await import('../src/commands/login.js')).default;
+
+      const signupCode = await signupCmd(['--name', 'Agent', '--env-id', '../etc/passwd']);
+      expect(signupCode).toBe(1);
+
+      const loginCode = await loginCmd(['--env-id', 'env_123/../../admin']);
+      expect(loginCode).toBe(1);
+
+      const errOut = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(errOut).toMatch(/Invalid env-id/i);
+    });
+  });
 });
+
 

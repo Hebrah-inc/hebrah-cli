@@ -7,22 +7,32 @@ import { spawn } from 'node:child_process';
 import { platform } from 'node:os';
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const BLOCKED_METADATA_HOSTS = new Set([
+  '169.254.169.254',
+  'metadata.google.internal',
+  'metadata.goog',
+  'metadata',
+  '100.100.100.200',
+  '[fd00:ec2::254]',
+  'fd00:ec2::254'
+]);
 
 /**
  * Validate that a URL is safe to open in the user's browser.
- * Rejects control characters, javascript:/file:/data: schemes, and non-loopback cleartext http:.
+ * Rejects control characters, javascript:/file:/data: schemes, cloud metadata hosts, and non-loopback cleartext http:.
  */
 export function validateBrowserUrl(rawUrl: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') {
     throw new Error('Browser URL is required.');
   }
-  if (/[\x00-\x1f\x7f-\x9f\s`$"';|<>\\]/.test(rawUrl)) {
+  const trimmed = rawUrl.trim();
+  if (/[\x00-\x1f\x7f-\x9f\s`$"';|<>\\]/.test(trimmed)) {
     throw new Error('Browser URL contains unsafe or disallowed characters.');
   }
 
   let parsed: URL;
   try {
-    parsed = new URL(rawUrl);
+    parsed = new URL(trimmed);
   } catch {
     throw new Error('Invalid browser URL format.');
   }
@@ -31,10 +41,15 @@ export function validateBrowserUrl(rawUrl: string): string {
     throw new Error('Browser URL must not contain embedded credentials.');
   }
 
+  const host = parsed.hostname.toLowerCase();
+  if (BLOCKED_METADATA_HOSTS.has(host) || host.startsWith('169.254.')) {
+    throw new Error(`Security error: refusing to open cloud metadata or link-local host "${host}".`);
+  }
+
   if (parsed.protocol === 'https:') {
     return parsed.toString();
   }
-  if (parsed.protocol === 'http:' && LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+  if (parsed.protocol === 'http:' && LOOPBACK_HOSTS.has(host)) {
     return parsed.toString();
   }
 

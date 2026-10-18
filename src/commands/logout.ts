@@ -10,15 +10,17 @@
 // `unset HEBRAH_API_KEY` (POSIX) or `Remove-Item Env:HEBRAH_API_KEY`
 // (PowerShell) to fully log out.
 
+import { parseArgs } from 'node:util';
 import { clearCredentials } from '../config/credentials.js';
 import { success, info, warn } from '../output/format.js';
+import { getArgv } from '../util/args.js';
 
 export default async function logout(
   _args: string[],
-  options: Record<string, unknown>
+  options: Record<string, unknown> = {}
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
-  const { values } = (await import('node:util')).parseArgs({
+  const argv = getArgv(options, _args);
+  const { values } = parseArgs({
     args: argv,
     options: {
       'revoke-all': { type: 'boolean', default: false }

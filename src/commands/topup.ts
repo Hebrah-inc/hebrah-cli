@@ -26,6 +26,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { api, ApiError, TimeoutError, validateApiBaseUrl } from '../api/client.js';
 import { loadCredentials } from '../config/credentials.js';
 import { openBrowser, validateBrowserUrl } from '../util/browser.js';
+import { getArgv } from '../util/args.js';
 import { json, success, info, warn, error, bold, dim, sanitizeTerminalText } from '../output/format.js';
 
 interface CheckoutSessionResponse {
@@ -68,9 +69,9 @@ export function validateCheckoutUrl(rawUrl: string): string {
 
 export default async function topup(
   _args: string[],
-  options: Record<string, unknown>
+  options: Record<string, unknown> = {}
 ): Promise<number> {
-  const argv = (options._argv as string[] | undefined) ?? _args;
+  const argv = getArgv(options, _args);
   const { values } = parseArgs({
     args: argv,
     options: {
