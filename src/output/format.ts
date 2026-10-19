@@ -81,20 +81,33 @@ export function json(data: unknown): void {
   console.log(safeJson);
 }
 
+const SGR_RE = /\x1b\[[0-9;]*m/g;
+
+export function visibleLength(s: string): number {
+  return s.replace(SGR_RE, '').length;
+}
+
+function padVisualEnd(s: string, width: number): string {
+  const pad = Math.max(0, width - visibleLength(s));
+  return s + ' '.repeat(pad);
+}
+
 export function table(headers: string[], rows: string[][]): void {
   if (rows.length === 0) {
     console.log(dim('(no rows)'));
     return;
   }
-  const safeHeaders = headers.map((h) => sanitizeTerminalText(h));
-  const safeRows = rows.map((r) => r.map((cell) => sanitizeTerminalText(cell ?? '')));
-  // Calculate column widths
+  const safeHeaders = headers.map((h) => redactSecrets(sanitizeTerminalText(h)));
+  const safeRows = rows.map((r) =>
+    r.map((cell) => redactSecrets(sanitizeAllowingSgr(cell ?? '')))
+  );
+  // Calculate column widths based on visible length (excluding SGR color codes)
   const widths = safeHeaders.map((h, i) =>
-    Math.max(h.length, ...safeRows.map((r) => (r[i] ?? '').length))
+    Math.max(visibleLength(h), ...safeRows.map((r) => visibleLength(r[i] ?? '')))
   );
 
   // Header
-  const headerLine = safeHeaders.map((h, i) => bold(h.padEnd(widths[i]))).join('  ');
+  const headerLine = safeHeaders.map((h, i) => bold(padVisualEnd(h, widths[i]))).join('  ');
   console.log(headerLine);
 
   // Separator
@@ -102,7 +115,7 @@ export function table(headers: string[], rows: string[][]): void {
 
   // Rows
   for (const row of safeRows) {
-    const line = row.map((cell, i) => (cell ?? '').padEnd(widths[i])).join('  ');
+    const line = row.map((cell, i) => padVisualEnd(cell ?? '', widths[i])).join('  ');
     console.log(line);
   }
 }
@@ -112,13 +125,13 @@ export function kv(pairs: Array<[string, string]>, labelColor: keyof typeof COLO
   for (const [key, value] of pairs) {
     const paddedKey = sanitizeTerminalText(key).padEnd(maxLabel);
     // Preserve intentional SGR color sequences emitted by CLI commands while stripping OSC/CSI/control chars
-    const safeVal = sanitizeAllowingSgr(String(value));
+    const safeVal = redactSecrets(sanitizeAllowingSgr(String(value)));
     console.log(`${colorize(paddedKey, labelColor)}  ${safeVal}`);
   }
 }
 
 export function success(message: string): void {
-  console.log(`${green('✓')} ${sanitizeAllowingSgr(message)}`);
+  console.log(`${green('✓')} ${redactSecrets(sanitizeAllowingSgr(message))}`);
 }
 
 export function warn(message: string): void {
@@ -130,7 +143,35 @@ export function error(message: string): void {
 }
 
 export function info(message: string): void {
-  console.log(`${blue('ℹ')} ${sanitizeAllowingSgr(message)}`);
+  console.log(`${blue('ℹ')} ${redactSecrets(sanitizeAllowingSgr(message))}`);
+}
+
+/**
+ * Standardized CLI error formatter & exit-code mapper:
+ * - Prints the redacted/sanitized error message (with optional prefix) and any `suggestion` hint.
+ * - Returns semantic exit codes: 2 (401 Auth), 3 (403 Scope/Forbidden), 4 (other ApiError / TimeoutError), 1 (general).
+ */
+export function handleCommandError(err: unknown, prefix?: string): number {
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  error(prefix ? `${prefix}: ${rawMessage}` : rawMessage);
+
+  if (typeof err === 'object' && err !== null) {
+    const suggestion = (err as { suggestion?: unknown }).suggestion;
+    if (typeof suggestion === 'string' && suggestion.length > 0) {
+      info(suggestion);
+    }
+    const statusCode = (err as { statusCode?: unknown }).statusCode;
+    if (typeof statusCode === 'number') {
+      if (statusCode === 401) return 2;
+      if (statusCode === 403) return 3;
+      if (statusCode === 402) return 5;
+      return 4;
+    }
+    if ((err as { name?: unknown }).name === 'TimeoutError') {
+      return 4;
+    }
+  }
+  return 1;
 }
 
 export function formatBytes(bytes: number): string {

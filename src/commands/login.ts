@@ -4,32 +4,149 @@
 //   hebrah login                              (opens browser authorization)
 //   hebrah login --env-id <id>                (opens browser auth & connects agent to clinic environment)
 //   hebrah login --headless                   (RFC 8628 device authorization for remote/SSH)
-//   hebrah login --manual                     (prompts for API key in terminal)
-//   hebrah login --key hb_conn_*|hb_pat_*     (non-interactive)
+//   hebrah login --key-stdin                  (reads API key from piped stdin — zero argv/history exposure)
+//   hebrah login --manual                     (prompts for API key in terminal with hidden echo)
+//   hebrah login --key [hb_conn_*|hb_pat_*]   (non-interactive flag or hidden prompt if value omitted)
 //   hebrah login --env                        (load from $HEBRAH_API_KEY)
 //   hebrah login --app-url <url> --api-url <url> (explicit staging/custom environment)
 
 import { parseArgs } from 'node:util';
 import { hostname } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { Writable } from 'node:stream';
 import {
   saveCredentials,
-  loadCredentials,
   isValidApiKeyFormat,
   maskApiKey
 } from '../config/credentials.js';
 import {
   api,
   ApiError,
-  inferApiUrlFromAppUrl,
   safeId,
   validateApiBaseUrl
 } from '../api/client.js';
 import { success, error, info, bold, dim, cyan, kv, json, sanitizeTerminalText } from '../output/format.js';
 import { startLoopbackAuth, type LoopbackAuthResult, type LoopbackAuthServer } from '../util/loopback.js';
 import { openBrowser, validateBrowserUrl } from '../util/browser.js';
-import { getArgv } from '../util/args.js';
+import { applyAuthUrlFlags, getArgv, resolveAppUrl } from '../util/args.js';
 import type { EnvironmentDetail } from './env.js';
+
+export { resolveAppUrl };
+
+const MAX_STDIN_KEY_BYTES = 4096;
+
+/**
+ * Scrubs an inline API key from `process.argv` and resets `process.title`
+ * to minimize exposure in `ps aux` / process table inspection.
+ */
+export function scrubProcessArgvSecret(secret: string): void {
+  if (!secret) return;
+  for (let i = 0; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (!arg) continue;
+    if (arg === secret) {
+      process.argv[i] = '[REDACTED]';
+    } else if (arg.includes(secret)) {
+      process.argv[i] = arg.split(secret).join('[REDACTED]');
+    }
+  }
+  try {
+    process.title = 'hebrah';
+  } catch {
+    // Ignore on platforms where process.title is read-only
+  }
+}
+
+/**
+ * Reads an API key from a piped non-TTY stream (e.g. `echo "$KEY" | hebrah login --key-stdin`)
+ * with a strict 4 KB upper bound to prevent memory exhaustion.
+ */
+export async function readKeyFromStdin(
+  stream: NodeJS.ReadableStream = process.stdin,
+  maxBytes = MAX_STDIN_KEY_BYTES
+): Promise<string> {
+  if ((stream as { isTTY?: boolean }).isTTY) {
+    throw new Error(
+      '--key-stdin requires piping an API key via standard input (e.g. `echo "$HEBRAH_API_KEY" | hebrah login --key-stdin`).'
+    );
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      stream.removeListener('data', onData);
+      stream.removeListener('end', onEnd);
+      stream.removeListener('error', onError);
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf-8');
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        settled = true;
+        cleanup();
+        reject(
+          new Error(
+            `Standard input exceeded maximum allowed API key length (${maxBytes} bytes).`
+          )
+        );
+        return;
+      }
+      chunks.push(buf);
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const raw = Buffer.concat(chunks).toString('utf-8');
+      const firstLine = raw.split(/\r?\n/).find((line) => line.trim().length > 0) ?? '';
+      resolve(firstLine.trim());
+    };
+
+    const onError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    stream.on('data', onData);
+    stream.on('end', onEnd);
+    stream.on('error', onError);
+  });
+}
+
+/**
+ * Prompts for an API key interactively on a TTY with terminal character echo suppressed.
+ */
+export async function promptHiddenApiKey(
+  promptText = 'API key (hb_conn_*, hb_pat_*, hb_live_*, or hb_test_*): '
+): Promise<string> {
+  const { createInterface } = await import('node:readline/promises');
+  process.stdout.write(promptText);
+  const mutedOutput = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    }
+  });
+  const rl = createInterface({
+    input: process.stdin,
+    output: mutedOutput,
+    terminal: true
+  });
+  try {
+    const answer = await rl.question('');
+    return answer.trim();
+  } finally {
+    rl.close();
+    process.stdout.write('\n');
+  }
+}
 
 interface DeviceCodeResponse {
   device_code: string;
@@ -49,21 +166,23 @@ interface DeviceTokenResponse {
   token_type: string;
 }
 
-async function pollStateTokenFromCloud(
-  stateNonce: string,
-  timeoutMs: number,
-  isCancelled: () => boolean
-): Promise<LoopbackAuthResult> {
-  const deadline = Date.now() + timeoutMs;
-  const pollIntervalMs = 2000;
+interface PollDeviceTokenOptions {
+  deviceCode: string;
+  pollIntervalMs: number;
+  deadlineMs: number;
+  isCancelled: () => boolean;
+  ignoreTransientErrors: boolean;
+  timeoutMessage: string;
+}
 
-  while (Date.now() < deadline && !isCancelled()) {
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
-    if (isCancelled()) break;
+async function pollDeviceToken(opts: PollDeviceTokenOptions): Promise<LoopbackAuthResult> {
+  while (Date.now() < opts.deadlineMs && !opts.isCancelled()) {
+    await new Promise((r) => setTimeout(r, opts.pollIntervalMs));
+    if (opts.isCancelled()) break;
 
     try {
       const tokenResp = await api.post<DeviceTokenResponse>('/v1/auth/device/token', {
-        device_code: stateNonce
+        device_code: opts.deviceCode
       });
       if (tokenResp && tokenResp.apiKey) {
         return {
@@ -83,32 +202,31 @@ async function pollStateTokenFromCloud(
         if (errorCode === 'access_denied') {
           throw new Error('Authorization was denied by the user.');
         }
+        if (errorCode === 'expired_token') {
+          throw new Error('Device authorization code expired.');
+        }
       }
-      // Keep polling until deadline on transient network/400 errors before user clicks Authorize
+      if (!opts.ignoreTransientErrors) {
+        throw err;
+      }
     }
   }
-  throw new Error(`Login timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+  throw new Error(opts.timeoutMessage);
 }
 
-export function resolveAppUrl(explicitAppUrl?: string, explicitApiUrl?: string): string {
-  if (explicitAppUrl) {
-    return validateApiBaseUrl(explicitAppUrl);
-  }
-  if (process.env.HEBRAH_APP_URL) {
-    return validateApiBaseUrl(process.env.HEBRAH_APP_URL);
-  }
-  const savedAppUrl = loadCredentials()?.appUrl;
-  if (savedAppUrl) {
-    return validateApiBaseUrl(savedAppUrl);
-  }
-  const apiUrl = explicitApiUrl ?? process.env.HEBRAH_API_URL ?? loadCredentials()?.apiUrl ?? '';
-  if (apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')) {
-    return 'http://localhost:3000';
-  }
-  if (apiUrl.includes('-api-')) {
-    return validateApiBaseUrl(apiUrl.replace('-api-', '-app-'));
-  }
-  return 'https://app.hebrah.com';
+function pollStateTokenFromCloud(
+  stateNonce: string,
+  timeoutMs: number,
+  isCancelled: () => boolean
+): Promise<LoopbackAuthResult> {
+  return pollDeviceToken({
+    deviceCode: stateNonce,
+    pollIntervalMs: 2000,
+    deadlineMs: Date.now() + timeoutMs,
+    isCancelled,
+    ignoreTransientErrors: true,
+    timeoutMessage: `Login timed out after ${Math.round(timeoutMs / 1000)} seconds.`
+  });
 }
 
 async function loginHeadlessDeviceFlow(timeoutMs: number): Promise<{
@@ -158,40 +276,14 @@ async function loginHeadlessDeviceFlow(timeoutMs: number): Promise<{
   process.once('SIGINT', onSigint);
 
   try {
-    while (Date.now() < deadline && !cancelled) {
-      await new Promise((r) => setTimeout(r, pollInterval));
-      if (cancelled) break;
-
-      try {
-        const tokenResp = await api.post<DeviceTokenResponse>('/v1/auth/device/token', {
-          device_code: codeResp.device_code
-        });
-        if (tokenResp && tokenResp.apiKey) {
-          return {
-            apiKey: tokenResp.apiKey,
-            orgId: tokenResp.orgId,
-            orgName: tokenResp.orgName
-          };
-        }
-      } catch (err) {
-        if (err instanceof ApiError) {
-          const detail = (err.body as { detail?: { error?: string } })?.detail;
-          const errorCode = detail?.error;
-          if (errorCode === 'authorization_pending' || err.statusCode === 428) {
-            continue;
-          }
-          if (errorCode === 'access_denied') {
-            throw new Error('Authorization was denied by the user.');
-          }
-          if (errorCode === 'expired_token') {
-            throw new Error('Device authorization code expired.');
-          }
-          throw err;
-        }
-        throw err;
-      }
-    }
-    throw new Error('Device authorization timed out.');
+    return await pollDeviceToken({
+      deviceCode: codeResp.device_code,
+      pollIntervalMs: pollInterval,
+      deadlineMs: deadline,
+      isCancelled: () => cancelled,
+      ignoreTransientErrors: false,
+      timeoutMessage: 'Device authorization timed out.'
+    });
   } finally {
     process.removeListener('SIGINT', onSigint);
   }
@@ -201,11 +293,23 @@ export default async function login(
   _args: string[],
   options: Record<string, unknown> = {}
 ): Promise<number> {
-  const argv = getArgv(options, _args);
+  const rawArgv = getArgv(options, _args);
+  // Convert bare `--key` (with no value following it) into `--manual` interactive hidden prompt
+  const argv = rawArgv.map((arg, idx) => {
+    if (arg === '--key') {
+      const next = rawArgv[idx + 1];
+      if (!next || next.startsWith('-')) {
+        return '--manual';
+      }
+    }
+    return arg;
+  });
+
   const { values } = parseArgs({
     args: argv,
     options: {
       key: { type: 'string' },
+      'key-stdin': { type: 'boolean', default: false },
       env: { type: 'boolean', default: false },
       manual: { type: 'boolean', default: false },
       headless: { type: 'boolean', default: false },
@@ -220,6 +324,9 @@ export default async function login(
   });
 
   let apiKey = values.key as string | undefined;
+  if (apiKey) {
+    scrubProcessArgvSecret(apiKey);
+  }
   let orgNameFromAuth: string | undefined;
   let orgIdFromAuth: string | undefined;
   let timeoutMs = 600_000;
@@ -232,41 +339,44 @@ export default async function login(
     timeoutMs = parsedTimeout;
   }
 
-  const flagAppUrl = values['app-url'] as string | undefined;
-  let flagApiUrl = values['api-url'] as string | undefined;
-  let targetEnvId = (values['env-id'] as string | undefined) ?? process.env.HEBRAH_ENV_ID;
+  const rawEnvId = (values['env-id'] as string | undefined) ?? process.env.HEBRAH_ENV_ID;
   const agentName = sanitizeTerminalText((values['agent-name'] as string | undefined) || `cli-agent-${hostname()}`);
 
   let appUrl: string;
+  let flagApiUrl: string | undefined;
+  let targetEnvId: string | undefined;
   try {
-    if (targetEnvId) {
-      safeId(targetEnvId, 'env-id');
-      targetEnvId = targetEnvId.trim();
-    }
-    if (!flagApiUrl && flagAppUrl) {
-      flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
-    }
-    appUrl = resolveAppUrl(flagAppUrl, flagApiUrl);
-    if (!flagApiUrl && appUrl) {
-      const inferred = inferApiUrlFromAppUrl(appUrl);
-      if (inferred && !process.env.HEBRAH_API_URL) {
-        flagApiUrl = inferred;
-      }
-    }
-    if (flagApiUrl) {
-      flagApiUrl = validateApiBaseUrl(flagApiUrl);
-      api.setBaseUrl(flagApiUrl);
-    }
+    const resolved = applyAuthUrlFlags({
+      appUrl: values['app-url'] as string | undefined,
+      apiUrl: values['api-url'] as string | undefined,
+      envId: rawEnvId,
+      inferFromResolvedAppUrl: true
+    });
+    appUrl = resolved.appUrl;
+    flagApiUrl = resolved.flagApiUrl;
+    targetEnvId = resolved.envId;
   } catch (err) {
     error((err as Error).message);
     return 1;
   }
 
+  const stdinStream =
+    (options._stdin as NodeJS.ReadableStream | undefined) ?? process.stdin;
+
   // 1. Direct --key flag
   if (apiKey) {
     apiKey = apiKey.trim();
   }
-  // 2. Direct --env flag
+  // 2. Piped --key-stdin flag (zero argv/shell-history exposure)
+  else if (values['key-stdin']) {
+    try {
+      apiKey = await readKeyFromStdin(stdinStream);
+    } catch (err) {
+      error((err as Error).message);
+      return 1;
+    }
+  }
+  // 3. Direct --env flag
   else if (values.env) {
     apiKey = process.env.HEBRAH_API_KEY?.trim();
     if (!apiKey) {
@@ -274,14 +384,17 @@ export default async function login(
       return 1;
     }
   }
-  // 3. Direct --manual prompt
-  else if (values.manual && process.stdin.isTTY) {
-    const { createInterface } = await import('node:readline/promises');
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      apiKey = (await rl.question('API key (hb_conn_* or hb_pat_*): ')).trim();
-    } finally {
-      rl.close();
+  // 4. Direct --manual (or bare --key) prompt with hidden terminal echo
+  else if (values.manual) {
+    if ((stdinStream as { isTTY?: boolean }).isTTY) {
+      apiKey = await promptHiddenApiKey();
+    } else {
+      try {
+        apiKey = await readKeyFromStdin(stdinStream);
+      } catch (err) {
+        error((err as Error).message);
+        return 1;
+      }
     }
   }
   // 4. Remote --headless Device Authorization (RFC 8628)

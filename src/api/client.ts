@@ -13,15 +13,15 @@ import { loadCredentials } from '../config/credentials.js';
 import { redactSecrets, sanitizeTerminalText } from '../output/format.js';
 
 const DEFAULT_PROD_API_URL = 'https://api.hebrah.com';
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+export const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 function loadPackageVersion(): string {
   try {
     const __dirname = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf-8'));
-    return pkg.version || '0.4.5';
+    return pkg.version || '0.4.6';
   } catch {
-    return '0.4.5';
+    return '0.4.6';
   }
 }
 
@@ -137,6 +137,14 @@ export function isCloudMetadataHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (BLOCKED_METADATA_HOSTS.has(host)) return true;
   if (host.startsWith('169.254.')) return true;
+  if (
+    host.startsWith('::ffff:a9fe:') ||
+    host.startsWith('[::ffff:a9fe:') ||
+    host.startsWith('::ffff:169.254.') ||
+    host.startsWith('[::ffff:169.254.')
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -395,15 +403,21 @@ class HebrahApi {
 
 function mapError(status: number, body: unknown): ApiError {
   let message = `HTTP ${status}`;
+  let suggestion: string | undefined;
+
   if (typeof body === 'object' && body !== null) {
-    if ('message' in body && typeof (body as any).message === 'string') {
-      message = (body as any).message;
-    } else if ('detail' in body) {
-      const detail = (body as any).detail;
+    const obj = body as Record<string, unknown>;
+    if (typeof obj.suggestion === 'string') {
+      suggestion = obj.suggestion;
+    }
+    if (typeof obj.message === 'string') {
+      message = obj.message;
+    } else if ('detail' in obj) {
+      const detail = obj.detail;
       if (typeof detail === 'string') {
         message = detail;
       } else if (typeof detail === 'object' && detail !== null && 'message' in detail) {
-        message = String((detail as any).message);
+        message = String((detail as Record<string, unknown>).message);
       } else {
         message = JSON.stringify(detail);
       }
@@ -411,8 +425,6 @@ function mapError(status: number, body: unknown): ApiError {
   }
 
   message = redactSecrets(sanitizeTerminalText(message));
-
-  const suggestion = (body as any)?.suggestion;
 
   switch (status) {
     case 401:

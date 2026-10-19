@@ -5,17 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import { platform } from 'node:os';
-
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-const BLOCKED_METADATA_HOSTS = new Set([
-  '169.254.169.254',
-  'metadata.google.internal',
-  'metadata.goog',
-  'metadata',
-  '100.100.100.200',
-  '[fd00:ec2::254]',
-  'fd00:ec2::254'
-]);
+import { LOOPBACK_HOSTS, isCloudMetadataHost } from '../api/client.js';
 
 /**
  * Validate that a URL is safe to open in the user's browser.
@@ -42,7 +32,7 @@ export function validateBrowserUrl(rawUrl: string): string {
   }
 
   const host = parsed.hostname.toLowerCase();
-  if (BLOCKED_METADATA_HOSTS.has(host) || host.startsWith('169.254.')) {
+  if (isCloudMetadataHost(host)) {
     throw new Error(`Security error: refusing to open cloud metadata or link-local host "${host}".`);
   }
 

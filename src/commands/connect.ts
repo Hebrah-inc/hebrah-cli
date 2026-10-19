@@ -23,24 +23,24 @@ export default async function connect(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const target = argv.find((a) => !a.startsWith('-')) ?? args[0];
-  if (!target) {
-    error('hebrah connect: target required');
-    error('Usage: hebrah connect <target> --scopes <scope1,scope2,...> [--ttl 3600] [--tier container|vm]');
-    return 1;
-  }
-
-  const flagOnly = argv.filter((a) => a !== target);
-  const { values } = parseArgs({
-    args: flagOnly,
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       scopes: { type: 'string' },
       ttl: { type: 'string', default: '3600' },
       tier: { type: 'string', default: 'container' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false
+    allowPositionals: true,
+    strict: false
   });
+
+  const target = positionals[0] ?? args[0];
+  if (!target) {
+    error('hebrah connect: target required');
+    error('Usage: hebrah connect <target> --scopes <scope1,scope2,...> [--ttl 3600] [--tier container|vm]');
+    return 1;
+  }
 
   if (!values.scopes) {
     error('--scopes required (comma-separated)');

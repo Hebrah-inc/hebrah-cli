@@ -88,13 +88,19 @@ async function main(): Promise<number> {
     // flag values, so we must hand the command the raw argv.
     const cmdArgv = process.argv.slice(2 + 1); // skip 'node', 'bin/hebrah'
     return await result.default(positionals.slice(1), { _command: cmd, debug, _argv: cmdArgv });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const errObj = err instanceof Error ? err : null;
+    const rawMsg = errObj?.message ?? String(err ?? 'unknown error');
+    const suggestion =
+      err && typeof err === 'object' && 'suggestion' in err && typeof (err as { suggestion?: unknown }).suggestion === 'string'
+        ? (err as { suggestion: string }).suggestion
+        : undefined;
     if (debug) {
-      console.error(redactSecrets(sanitizeTerminalText(String(err.stack ?? err.message ?? err))));
+      console.error(redactSecrets(sanitizeTerminalText(String(errObj?.stack ?? rawMsg))));
     } else {
-      console.error(`hebrah: ${redactSecrets(sanitizeTerminalText(String(err.message ?? 'unknown error')))}`);
-      if (err.suggestion) {
-        console.error(`Hint: ${redactSecrets(sanitizeTerminalText(String(err.suggestion)))}`);
+      console.error(`hebrah: ${redactSecrets(sanitizeTerminalText(rawMsg))}`);
+      if (suggestion) {
+        console.error(`Hint: ${redactSecrets(sanitizeTerminalText(suggestion))}`);
       }
     }
     return 4;
@@ -110,7 +116,7 @@ Usage:
 Commands:
   Account:
     signup              Create a new agent account ($5.00 credit)
-    login               Authenticate via browser OAuth or API key (--key, --app-url, --env-id)
+    login               Authenticate via browser OAuth or API key (--key-stdin, --manual, --env-id)
     logout              Remove local credentials
     whoami              Show account info + balance
     usage               Show metering for current period

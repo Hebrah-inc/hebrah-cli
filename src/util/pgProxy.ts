@@ -9,16 +9,29 @@
  */
 
 import * as net from 'node:net';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { api, safeId } from '../api/client.js';
 import { redactSecrets, sanitizeTerminalText } from '../output/format.js';
 
 export type PgProxyClient = typeof api;
+
+export function generateEphemeralPgPassword(): string {
+  return randomBytes(16).toString('hex');
+}
 
 export interface PgProxyOptions {
   envId: string;
   port: number;
   host?: string;
   database?: string;
+  /**
+   * Ephemeral session password required by the PostgreSQL wire-protocol handshake.
+   * Defaults to a freshly generated 128-bit hex token (`generateEphemeralPgPassword()`).
+   * Pass `null` or `requirePassword: false` to disable local password authentication.
+   */
+  password?: string | null;
+  requirePassword?: boolean;
+  preAuthTimeoutMs?: number;
   client?: PgProxyClient;
   onQuery?: (sql: string, rowCount: number, durationMs: number) => void;
   onError?: (err: Error) => void;
@@ -27,6 +40,7 @@ export interface PgProxyOptions {
 export interface PgProxyHandle {
   host: string;
   port: number;
+  password: string | null;
   close: () => Promise<void>;
 }
 
@@ -73,6 +87,21 @@ function buildAuthenticationOk(): Buffer {
   return buildBackendPacket('R', payload);
 }
 
+function buildAuthenticationCleartextPassword(): Buffer {
+  const payload = Buffer.alloc(4);
+  payload.writeInt32BE(3, 0);
+  return buildBackendPacket('R', payload);
+}
+
+function verifyPasswordConstantTime(candidate: Buffer, expected: string): boolean {
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  if (candidate.length !== expectedBuf.length) {
+    timingSafeEqual(expectedBuf, expectedBuf);
+    return false;
+  }
+  return timingSafeEqual(candidate, expectedBuf);
+}
+
 function buildBackendKeyData(pid = 4242, secret = 1337): Buffer {
   const payload = Buffer.alloc(8);
   payload.writeInt32BE(pid, 0);
@@ -82,6 +111,28 @@ function buildBackendKeyData(pid = 4242, secret = 1337): Buffer {
 
 function buildReadyForQuery(txStatus: 'I' | 'T' | 'E' = 'I'): Buffer {
   return buildBackendPacket('Z', Buffer.from(txStatus, 'ascii'));
+}
+
+function buildPostAuthHandshake(): Buffer {
+  return Buffer.concat([
+    buildAuthenticationOk(),
+    buildParameterStatus(
+      'server_version',
+      '16.4 (Hebrah Isolated Clinic Runtime)'
+    ),
+    buildParameterStatus('server_encoding', 'UTF8'),
+    buildParameterStatus('client_encoding', 'UTF8'),
+    buildParameterStatus('DateStyle', 'ISO, MDY'),
+    buildParameterStatus('integer_datetimes', 'on'),
+    buildParameterStatus('IntervalStyle', 'postgres'),
+    buildParameterStatus('is_superuser', 'off'),
+    buildParameterStatus('session_authorization', 'hebrah_readonly'),
+    buildParameterStatus('standard_conforming_strings', 'on'),
+    buildParameterStatus('TimeZone', 'UTC'),
+    buildParameterStatus('application_name', 'hebrah-db-proxy'),
+    buildBackendKeyData(process.pid, 0x48425248),
+    buildReadyForQuery('I')
+  ]);
 }
 
 function buildRowDescription(columns: string[]): Buffer {
@@ -161,14 +212,18 @@ function buildParameterDescription(paramCount = 0): Buffer {
   return buildBackendPacket('t', buf);
 }
 
-function buildErrorResponse(message: string, code = '42000'): Buffer {
+function buildErrorResponse(
+  message: string,
+  code = '42000',
+  severity: 'ERROR' | 'FATAL' = 'ERROR'
+): Buffer {
   const safeMessage = redactSecrets(sanitizeTerminalText(message));
   const safeCode = sanitizeTerminalText(code).slice(0, 5) || '42000';
   const parts = [
     Buffer.from('S', 'ascii'),
-    cstr('ERROR'),
+    cstr(severity),
     Buffer.from('V', 'ascii'),
-    cstr('ERROR'),
+    cstr(severity),
     Buffer.from('C', 'ascii'),
     cstr(safeCode),
     Buffer.from('M', 'ascii'),
@@ -485,6 +540,8 @@ export async function isPortAvailable(
 
 const ALLOWED_PROXY_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 export const MAX_PG_PACKET_BYTES = 16 * 1024 * 1024; // 16 MB ceiling per PostgreSQL frame/buffer
+export const PRE_AUTH_SOCKET_TIMEOUT_MS = 10_000;
+export const IDLE_SOCKET_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Starts a local TCP PostgreSQL v3 wire-protocol server on `127.0.0.1:<port>`.
@@ -502,6 +559,17 @@ export async function startPgWireProxy(
   const databaseName =
     options.database ?? `clinic_${options.envId.replace(/-/g, '_').slice(0, 12)}`;
 
+  const requirePassword =
+    options.requirePassword !== undefined
+      ? options.requirePassword
+      : options.password !== null && options.password !== '';
+  const expectedPassword: string | null = requirePassword
+    ? options.password && options.password.length > 0
+      ? options.password
+      : generateEphemeralPgPassword()
+    : null;
+  const preAuthTimeoutMs = options.preAuthTimeoutMs ?? PRE_AUTH_SOCKET_TIMEOUT_MS;
+
   const activeSockets = new Set<net.Socket>();
 
   const server = net.createServer((socket) => {
@@ -511,11 +579,13 @@ export async function startPgWireProxy(
     });
 
     let startupCompleted = false;
+    let authenticated = expectedPassword === null;
     let buffer = Buffer.alloc(0);
     let boundStatementSql = '';
     let isProcessing = false;
+    let needsRedrain = false;
 
-    socket.setTimeout(300_000, () => {
+    socket.setTimeout(preAuthTimeoutMs, () => {
       socket.destroy();
     });
 
@@ -524,10 +594,16 @@ export async function startPgWireProxy(
     });
 
     const drainBuffer = async (): Promise<void> => {
-      if (isProcessing) return;
+      if (isProcessing) {
+        needsRedrain = true;
+        return;
+      }
       isProcessing = true;
       try {
-        await processBuffer();
+        do {
+          needsRedrain = false;
+          await processBuffer();
+        } while (needsRedrain && !socket.destroyed);
       } finally {
         isProcessing = false;
       }
@@ -559,28 +635,19 @@ export async function startPgWireProxy(
             return;
           }
 
-          // Protocol v3.0 StartupMessage (196608 = 0x00030000)
+          // Must be Protocol v3.0 StartupMessage (196608 = 0x00030000)
+          if (code !== 196608) {
+            socket.destroy();
+            return;
+          }
+
           startupCompleted = true;
-          const handshake = Buffer.concat([
-            buildAuthenticationOk(),
-            buildParameterStatus(
-              'server_version',
-              '16.4 (Hebrah Isolated Clinic Runtime)'
-            ),
-            buildParameterStatus('server_encoding', 'UTF8'),
-            buildParameterStatus('client_encoding', 'UTF8'),
-            buildParameterStatus('DateStyle', 'ISO, MDY'),
-            buildParameterStatus('integer_datetimes', 'on'),
-            buildParameterStatus('IntervalStyle', 'postgres'),
-            buildParameterStatus('is_superuser', 'off'),
-            buildParameterStatus('session_authorization', 'hebrah_readonly'),
-            buildParameterStatus('standard_conforming_strings', 'on'),
-            buildParameterStatus('TimeZone', 'UTC'),
-            buildParameterStatus('application_name', 'hebrah-db-proxy'),
-            buildBackendKeyData(process.pid, 0x48425248),
-            buildReadyForQuery('I')
-          ]);
-          socket.write(handshake);
+          if (!authenticated) {
+            socket.write(buildAuthenticationCleartextPassword());
+          } else {
+            socket.setTimeout(IDLE_SOCKET_TIMEOUT_MS);
+            socket.write(buildPostAuthHandshake());
+          }
           continue;
         }
 
@@ -600,6 +667,40 @@ export async function startPgWireProxy(
         if (msgType === 'X') {
           socket.end();
           return;
+        }
+
+        if (!authenticated) {
+          if (msgType !== 'p') {
+            socket.write(
+              buildErrorResponse(
+                'Password authentication required for local Hebrah PostgreSQL proxy',
+                '28P01',
+                'FATAL'
+              )
+            );
+            socket.destroy();
+            return;
+          }
+
+          const nulIdx = payload.indexOf(0);
+          const candidateBytes =
+            nulIdx !== -1 ? payload.subarray(0, nulIdx) : payload;
+          if (!verifyPasswordConstantTime(candidateBytes, expectedPassword!)) {
+            socket.write(
+              buildErrorResponse(
+                'password authentication failed for user "hebrah_readonly"',
+                '28P01',
+                'FATAL'
+              )
+            );
+            socket.destroy();
+            return;
+          }
+
+          authenticated = true;
+          socket.setTimeout(IDLE_SOCKET_TIMEOUT_MS);
+          socket.write(buildPostAuthHandshake());
+          continue;
         }
 
         if (msgType === 'Q') {
@@ -757,6 +858,7 @@ export async function startPgWireProxy(
   return {
     host,
     port: actualPort,
+    password: expectedPassword,
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const s of activeSockets) {

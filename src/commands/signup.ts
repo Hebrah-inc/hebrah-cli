@@ -8,11 +8,11 @@
 // Returns 0 on success (saves credentials), 1 on user error, 4 on server error.
 
 import { parseArgs } from 'node:util';
-import { api, ApiError, inferApiUrlFromAppUrl, safeId, validateApiBaseUrl } from '../api/client.js';
+import { api, ApiError } from '../api/client.js';
 import { saveCredentials, maskApiKey } from '../config/credentials.js';
 import { json, success, info, error, bold, sanitizeTerminalText } from '../output/format.js';
 import { validateBrowserUrl } from '../util/browser.js';
-import { getArgv } from '../util/args.js';
+import { applyAuthUrlFlags, getArgv } from '../util/args.js';
 
 interface SignupResponse {
   orgId: string;
@@ -48,24 +48,16 @@ export default async function signup(
     allowPositionals: false
   });
 
-  let flagAppUrl = values['app-url'] as string | undefined;
-  let flagApiUrl = values['api-url'] as string | undefined;
-  let defaultEnvId = values['env-id'] as string | undefined;
+  let flagAppUrl: string | undefined;
+  let defaultEnvId: string | undefined;
   try {
-    if (defaultEnvId) {
-      safeId(defaultEnvId, 'env-id');
-      defaultEnvId = defaultEnvId.trim();
-    }
-    if (flagAppUrl) {
-      flagAppUrl = validateApiBaseUrl(flagAppUrl);
-    }
-    if (!flagApiUrl && flagAppUrl) {
-      flagApiUrl = inferApiUrlFromAppUrl(flagAppUrl);
-    }
-    if (flagApiUrl) {
-      flagApiUrl = validateApiBaseUrl(flagApiUrl);
-      api.setBaseUrl(flagApiUrl);
-    }
+    const resolved = applyAuthUrlFlags({
+      appUrl: values['app-url'] as string | undefined,
+      apiUrl: values['api-url'] as string | undefined,
+      envId: values['env-id'] as string | undefined
+    });
+    flagAppUrl = resolved.flagAppUrl;
+    defaultEnvId = resolved.envId;
   } catch (err) {
     error((err as Error).message);
     return 1;

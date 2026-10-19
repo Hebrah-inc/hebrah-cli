@@ -27,7 +27,7 @@ describe('hebrah db command suite & PostgreSQL wire-protocol proxy', () => {
     );
   });
 
-  it('outputs local proxy coordinates for `hebrah db proxy <env_id> 5432`', async () => {
+  it('outputs local proxy coordinates with an ephemeral session password for `hebrah db proxy <env_id> 5432`', async () => {
     const code = await dbCommand(
       ['proxy', 'e858732a-828d-418b-ab48-4189d8a5cc04', '15433', '--json'],
       { _argv: ['proxy', 'e858732a-828d-418b-ab48-4189d8a5cc04', '15433', '--json'] }
@@ -37,6 +37,12 @@ describe('hebrah db command suite & PostgreSQL wire-protocol proxy', () => {
     expect(output).toContain('e858732a-828d-418b-ab48-4189d8a5cc04');
     expect(output).toContain('127.0.0.1');
     expect(output).toContain('15433');
+    const parsed = JSON.parse(output) as {
+      password: string;
+      auth_mode: string;
+    };
+    expect(parsed.auth_mode).toBe('ephemeral_password');
+    expect(parsed.password).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('exports valid WireGuard configuration with 0600 permissions on --out', async () => {
@@ -135,7 +141,7 @@ describe('hebrah db command suite & PostgreSQL wire-protocol proxy', () => {
     );
   });
 
-  it('starts a live PostgreSQL v3 wire-protocol TCP server and answers SQL queries', async () => {
+  it('starts a live PostgreSQL v3 wire-protocol TCP server, authenticates via ephemeral password, and answers SQL queries', async () => {
     vi.spyOn(api, 'post').mockResolvedValue({
       columns: ['id', 'mrn'],
       rows: [{ id: 'pat-001', mrn: 'MRN-9001' }],
@@ -147,6 +153,8 @@ describe('hebrah db command suite & PostgreSQL wire-protocol proxy', () => {
       port: 0, // kernel-assigned ephemeral port
       client: api
     });
+
+    expect(proxy.password).toMatch(/^[0-9a-f]{32}$/);
 
     try {
       const responseText = await new Promise<string>((resolve, reject) => {
@@ -161,6 +169,7 @@ describe('hebrah db command suite & PostgreSQL wire-protocol proxy', () => {
           }
         );
 
+        let sentPassword = false;
         let sentQuery = false;
         let collected = Buffer.alloc(0);
 
@@ -168,10 +177,28 @@ describe('hebrah db command suite & PostgreSQL wire-protocol proxy', () => {
           collected = Buffer.concat([collected, chunk]);
           const ascii = collected.toString('utf8');
 
-          if (!sentQuery && collected.includes(Buffer.from('Z', 'ascii'))) {
+          // 1. Respond to AuthenticationCleartextPassword ('R\0\0\0\x08\0\0\0\x03') with PasswordMessage ('p')
+          if (
+            !sentPassword &&
+            collected.length >= 9 &&
+            collected[0] === 0x52 &&
+            collected.readInt32BE(5) === 3
+          ) {
+            sentPassword = true;
+            collected = Buffer.alloc(0);
+            const pwBytes = Buffer.from(`${proxy.password}\0`, 'utf8');
+            const pPacket = Buffer.alloc(1 + 4 + pwBytes.length);
+            pPacket.write('p', 0, 1, 'ascii');
+            pPacket.writeInt32BE(4 + pwBytes.length, 1);
+            pwBytes.copy(pPacket, 5);
+            clientSocket.write(pPacket);
+            return;
+          }
+
+          // 2. Once ReadyForQuery ('Z') arrives after auth, send Simple Query ('Q')
+          if (sentPassword && !sentQuery && collected.includes(Buffer.from('Z', 'ascii'))) {
             sentQuery = true;
             collected = Buffer.alloc(0);
-            // Send Simple Query ('Q') packet
             const sqlBytes = Buffer.from(
               'SELECT id, mrn FROM public.patients LIMIT 1\0',
               'utf8'

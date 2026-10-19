@@ -22,7 +22,7 @@ export default async function revoke(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
     args: argv,
     options: {
       all: { type: 'boolean', default: false },
@@ -30,10 +30,11 @@ export default async function revoke(
       target: { type: 'string' },
       yes: { type: 'boolean', short: 'y', default: false }
     },
-    allowPositionals: true
+    allowPositionals: true,
+    strict: false
   });
 
-  const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
+  const connId = positionals[0] ?? args[0];
 
   try {
     if (values.all) {

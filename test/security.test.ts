@@ -806,6 +806,7 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       const handle = await startPgWireProxy({
         envId: 'env_s10_test',
         port: 0,
+        requirePassword: false,
         client: mockClient as never,
       });
 
@@ -994,6 +995,454 @@ describe('CLI Security, Anti-Tampering & Onboarding Suite (v0.4.0)', () => {
       expect(errOut).toMatch(/Invalid env-id/i);
     });
   });
+
+  // =========================================================================
+  // S-11: Ephemeral PG Proxy Auth & Stdin/Hidden Login Hardening
+  // =========================================================================
+  describe('S-11: Ephemeral PG Proxy Auth & Stdin/Hidden Login Hardening', () => {
+    it('requires AuthenticationCleartextPassword on 127.0.0.1 PG proxy and rejects wrong passwords or unauthenticated queries with FATAL 28P01', async () => {
+      const { startPgWireProxy } = await import('../src/util/pgProxy.js');
+      const net = await import('node:net');
+
+      const mockClient = {
+        post: vi.fn().mockResolvedValue({
+          columns: ['id'],
+          rows: [{ id: 'pat-1' }],
+          rowCount: 1,
+        }),
+      };
+
+      const proxy = await startPgWireProxy({
+        envId: 'env_s11_auth',
+        port: 0,
+        client: mockClient as never,
+      });
+
+      expect(proxy.password).toMatch(/^[0-9a-f]{32}$/);
+
+      try {
+        // Case A: Client sends Simple Query ('Q') immediately after StartupMessage without 'p' PasswordMessage
+        const unauthResponse = await new Promise<string>((resolve, reject) => {
+          const sock = net.createConnection({ host: proxy.host, port: proxy.port }, () => {
+            const startup = Buffer.alloc(8);
+            startup.writeInt32BE(8, 0);
+            startup.writeInt32BE(196608, 4);
+            sock.write(startup);
+          });
+
+          let sentQuery = false;
+          let buf = Buffer.alloc(0);
+          sock.on('data', (chunk: Buffer) => {
+            buf = Buffer.concat([buf, chunk]);
+            if (!sentQuery && buf[0] === 0x52) {
+              sentQuery = true;
+              const sqlBytes = Buffer.from('SELECT 1\0', 'utf8');
+              const qMsg = Buffer.alloc(5 + sqlBytes.length);
+              qMsg[0] = 0x51; // 'Q'
+              qMsg.writeInt32BE(4 + sqlBytes.length, 1);
+              sqlBytes.copy(qMsg, 5);
+              sock.write(qMsg);
+            }
+          });
+          sock.on('close', () => resolve(buf.toString('utf8')));
+          sock.on('error', reject);
+        });
+
+        expect(unauthResponse).toContain('FATAL');
+        expect(unauthResponse).toContain('28P01');
+        expect(mockClient.post).not.toHaveBeenCalled();
+
+        // Case B: Client sends wrong password in 'p' PasswordMessage
+        const wrongPwResponse = await new Promise<string>((resolve, reject) => {
+          const sock = net.createConnection({ host: proxy.host, port: proxy.port }, () => {
+            const startup = Buffer.alloc(8);
+            startup.writeInt32BE(8, 0);
+            startup.writeInt32BE(196608, 4);
+            sock.write(startup);
+          });
+
+          let sentPw = false;
+          let buf = Buffer.alloc(0);
+          sock.on('data', (chunk: Buffer) => {
+            buf = Buffer.concat([buf, chunk]);
+            if (!sentPw && buf[0] === 0x52) {
+              sentPw = true;
+              const pwBytes = Buffer.from('wrong_password_attempt\0', 'utf8');
+              const pMsg = Buffer.alloc(5 + pwBytes.length);
+              pMsg[0] = 0x70; // 'p'
+              pMsg.writeInt32BE(4 + pwBytes.length, 1);
+              pwBytes.copy(pMsg, 5);
+              sock.write(pMsg);
+            }
+          });
+          sock.on('close', () => resolve(buf.toString('utf8')));
+          sock.on('error', reject);
+        });
+
+        expect(wrongPwResponse).toContain('FATAL');
+        expect(wrongPwResponse).toContain('28P01');
+        expect(wrongPwResponse).toContain('password authentication failed');
+        expect(mockClient.post).not.toHaveBeenCalled();
+      } finally {
+        await proxy.close();
+      }
+    });
+
+    it('reads piped API key via --key-stdin, rejects oversized stdin (>4 KB), and rejects TTY stdin without a pipe', async () => {
+      const { Readable } = await import('node:stream');
+      const { readKeyFromStdin } = await import('../src/commands/login.js');
+
+      // 1. Valid piped key via --key-stdin in login()
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            orgId: 'org-stdin-test',
+            orgName: 'Stdin Health Clinic',
+            tier: 'active',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const pipedKey = 'hb_pat_stdinSecretKey1234567890';
+      const stdinStream = Readable.from([`${pipedKey}\n`]);
+      const code = await login(['--key-stdin'], {
+        _argv: ['--key-stdin'],
+        _stdin: stdinStream,
+      });
+      expect(code).toBe(0);
+      expect(loadCredentials()?.apiKey).toBe(pipedKey);
+
+      // 2. Oversized stdin (> 4096 bytes) is rejected before buffering unbounded memory
+      const hugeStream = Readable.from(['hb_pat_' + 'A'.repeat(5000)]);
+      await expect(readKeyFromStdin(hugeStream, 4096)).rejects.toThrow(
+        /exceeded maximum allowed API key length/i,
+      );
+
+      // 3. Interactive TTY stdin with --key-stdin is rejected with actionable guidance
+      const ttyStream = Object.assign(Readable.from(['']), { isTTY: true });
+      await expect(readKeyFromStdin(ttyStream)).rejects.toThrow(
+        /--key-stdin requires piping an API key/i,
+      );
+    });
+
+    it('scrubs inline --key secrets from process.argv and resets process.title', async () => {
+      const { scrubProcessArgvSecret } = await import('../src/commands/login.js');
+      const inlineSecret = 'hb_live_inlineProcessArgvSecret999';
+      const origArgv = [...process.argv];
+      try {
+        process.argv.push('--key', inlineSecret, `--key=${inlineSecret}`);
+        scrubProcessArgvSecret(inlineSecret);
+
+        expect(process.argv).not.toContain(inlineSecret);
+        expect(process.argv.some((a) => a.includes(inlineSecret))).toBe(false);
+        expect(process.argv).toContain('[REDACTED]');
+        expect(process.argv).toContain('--key=[REDACTED]');
+      } finally {
+        process.argv = origArgv;
+      }
+    });
+  });
+
+  describe('S-14: CLI Code Review & Refactoring Verification', () => {
+    it('correctly resolves defaultEnvId when flags with string values precede optional positionals (patients, query, logs)', async () => {
+      saveCredentials({
+        apiKey: 'hb_pat_validTestKey123456',
+        orgId: 'org-1',
+        orgName: 'Default Clinic',
+        keyPrefix: 'hb_pat_validTe...',
+        createdAt: new Date().toISOString(),
+        defaultEnvId: 'env_default_clinic_99'
+      });
+
+      const getSpy = vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+        if (path.endsWith('/patients')) {
+          return { environment_id: 'env_default_clinic_99', total: 0, patients: [] };
+        }
+        if (path.endsWith('/logs')) {
+          return [];
+        }
+        return {};
+      });
+      const postSpy = vi.spyOn(api, 'post').mockResolvedValue({
+        rows: [{ ok: 1 }],
+        row_count: 1,
+        columns: ['ok'],
+        execution_time_ms: 2,
+        bytes_egressed: 16
+      });
+
+      // 1. `hebrah env patients --department Cardiology` -> should NOT treat "Cardiology" as environment_id
+      const patCode = await env(['patients', '--department', 'Cardiology'], {
+        _argv: ['patients', '--department', 'Cardiology']
+      });
+      expect(patCode).toBe(0);
+      expect(getSpy).toHaveBeenCalledWith(
+        '/v1/environments/env_default_clinic_99/ehr/patients',
+        expect.objectContaining({ department: 'Cardiology' })
+      );
+
+      // 2. `hebrah env query --sql "SELECT 1"` -> should NOT treat "SELECT 1" as environment_id
+      const queryCode = await env(['query', '--sql', 'SELECT 1'], {
+        _argv: ['query', '--sql', 'SELECT 1']
+      });
+      expect(queryCode).toBe(0);
+      expect(postSpy).toHaveBeenCalledWith(
+        '/v1/environments/env_default_clinic_99/db/query',
+        expect.objectContaining({ sql: 'SELECT 1' })
+      );
+
+      // 3. `hebrah env logs --limit 5` -> should NOT treat "5" as environment_id
+      const logsCode = await env(['logs', '--limit', '5'], {
+        _argv: ['logs', '--limit', '5']
+      });
+      expect(logsCode).toBe(0);
+      expect(getSpy).toHaveBeenCalledWith(
+        '/v1/environments/env_default_clinic_99/logs',
+        { limit: '5' }
+      );
+    });
+
+    it('calculates visual column width excluding SGR ANSI escape codes and redacts secrets in table()', async () => {
+      const { table, green, visibleLength } = await import('../src/output/format.js');
+      const coloredActive = `\x1b[32mactive\x1b[0m`;
+      expect(visibleLength(coloredActive)).toBe(6);
+      expect(visibleLength(green('active'))).toBe(6);
+
+      const lines: string[] = [];
+      const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+      try {
+        table(
+          ['STATUS', 'NOTE'],
+          [
+            [coloredActive, 'Token hb_live_secretToken1234567890'],
+            ['paused', 'Normal row']
+          ]
+        );
+        // Header + separator + 2 data rows = 4 lines
+        expect(lines.length).toBe(4);
+        // Secret in table cell should be redacted
+        expect(lines[2]).not.toContain('hb_live_secretToken1234567890');
+        expect(lines[2]).toContain('[REDACTED_HEBRAH_TOKEN]');
+        // Visual alignment: stripping SGR codes from row 1 and row 2 should place column 2 at the exact same index (8)
+        const stripSgr = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+        const col2IdxRow1 = stripSgr(lines[2]).indexOf('Token [REDACTED_HEBRAH_TOKEN]');
+        const col2IdxRow2 = stripSgr(lines[3]).indexOf('Normal row');
+        expect(col2IdxRow1).toBe(8);
+        expect(col2IdxRow1).toBe(col2IdxRow2);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    it('blocks IPv4-mapped IPv6 cloud metadata link-local addresses in isCloudMetadataHost and validateApiBaseUrl', async () => {
+      const { isCloudMetadataHost, validateApiBaseUrl } = await import('../src/api/client.js');
+      expect(isCloudMetadataHost('[::ffff:169.254.169.254]')).toBe(true);
+      expect(isCloudMetadataHost('::ffff:a9fe:a9fe')).toBe(true);
+      expect(() => validateApiBaseUrl('https://[::ffff:169.254.169.254]')).toThrow(
+        /cloud metadata or link-local/i
+      );
+    });
+
+    it('returns semantic exit codes and redacts secrets in handleCommandError', async () => {
+      const { handleCommandError } = await import('../src/output/format.js');
+      const { ApiError } = await import('../src/api/client.js');
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect(handleCommandError(new ApiError('Unauthorized key hb_pat_1234567890abcdef', 401))).toBe(2);
+        expect(handleCommandError(new ApiError('Insufficient funds', 402, null, 'Run hebrah topup'))).toBe(5);
+        expect(handleCommandError(new ApiError('Server error', 500))).toBe(4);
+        const allErrors = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+        expect(allErrors).not.toContain('hb_pat_1234567890abcdef');
+        expect(allErrors).toContain('[REDACTED_HEBRAH_TOKEN]');
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('S-15: Fourth-Pass Security Sweep (Symlink/TOCTOU, Loopback Host Header, PG Pre-Auth Timeout, Skill & Env Sanitization)', () => {
+    it('S-1: writeWireguardConfigFile rejects dangling symlinks, symlinked parent directories, and writes atomically with 0600 permissions', async () => {
+      const { writeWireguardConfigFile } = await import('../src/util/wireguard.js');
+      const { mkdirSync } = await import('node:fs');
+
+      // 1. Dangling/broken symlink at target path (existsSync would return false, lstatSync catches it)
+      const danglingLink = join(tempDir, 'dangling.conf');
+      symlinkSync(join(tempDir, 'nonexistent-target.conf'), danglingLink);
+      expect(() => writeWireguardConfigFile(danglingLink, '[Interface]\nPrivateKey = AAAA\n')).toThrow(
+        /symlink|symbolic link/i
+      );
+
+      // 2. Symlinked parent directory
+      const realDir = join(tempDir, 'real-dir');
+      mkdirSync(realDir, { mode: 0o700 });
+      const symlinkDir = join(tempDir, 'symlink-dir');
+      symlinkSync(realDir, symlinkDir);
+      expect(() =>
+        writeWireguardConfigFile(join(symlinkDir, 'wg0.conf'), '[Interface]\nPrivateKey = AAAA\n')
+      ).toThrow(/symlinked directory/i);
+
+      // 3. Valid write creates 0o600 regular file atomically
+      const validConf = join(realDir, 'hebrah-env.conf');
+      const writtenPath = writeWireguardConfigFile(validConf, '[Interface]\nPrivateKey = AAAA\n');
+      const st = statSync(writtenPath);
+      expect(st.mode & 0o777).toBe(0o600);
+    });
+
+    it('S-2: hebrah query --file rejects symbolic links before reading file contents', async () => {
+      const queryCmd = (await import('../src/commands/query.js')).default;
+      const secretFile = join(tempDir, 'secret-target.sql');
+      writeFileSync(secretFile, 'SELECT 1;');
+      const symlinkSql = join(tempDir, 'link.sql');
+      symlinkSync(secretFile, symlinkSql);
+
+      const postSpy = vi.spyOn(api, 'post');
+      const code = await queryCmd(['conn_123', '--file', symlinkSql]);
+      expect(code).toBe(1);
+      expect(postSpy).not.toHaveBeenCalled();
+      const errOut = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(errOut).toMatch(/symbolic link/i);
+    });
+
+    it('S-3: loopback auth server rejects missing or empty Host headers (HTTP/1.0 DNS rebinding bypass)', async () => {
+      const { isValidLoopbackHostHeader, startLoopbackAuth } = await import('../src/util/loopback.js');
+      const net = await import('node:net');
+
+      expect(isValidLoopbackHostHeader(undefined)).toBe(false);
+      expect(isValidLoopbackHostHeader('')).toBe(false);
+      expect(isValidLoopbackHostHeader('   ')).toBe(false);
+      expect(isValidLoopbackHostHeader('127.0.0.1:43210')).toBe(true);
+      expect(isValidLoopbackHostHeader('localhost:43210')).toBe(true);
+
+      const listener = await startLoopbackAuth();
+      try {
+        // Send raw HTTP/1.0 request with NO Host header
+        const rawResp = await new Promise<string>((resolve, reject) => {
+          const sock = net.createConnection({ host: '127.0.0.1', port: listener.port }, () => {
+            sock.write(
+              `GET /callback?apiKey=hb_pat_validkey12345678&state=${listener.state} HTTP/1.0\r\n\r\n`
+            );
+          });
+          let data = '';
+          sock.on('data', (chunk) => {
+            data += chunk.toString('utf8');
+          });
+          sock.on('end', () => resolve(data));
+          sock.on('error', reject);
+        });
+        expect(rawResp).toContain('403 Forbidden');
+        expect(rawResp).toMatch(/invalid Host header/i);
+      } finally {
+        listener.close();
+      }
+    });
+
+    it('S-4: startPgWireProxy disconnects idle pre-authentication sockets after preAuthTimeoutMs', async () => {
+      const { startPgWireProxy } = await import('../src/util/pgProxy.js');
+      const net = await import('node:net');
+
+      const proxy = await startPgWireProxy({
+        envId: 'env_s15_timeout',
+        port: 0,
+        preAuthTimeoutMs: 60
+      });
+
+      try {
+        const closedQuickly = await new Promise<boolean>((resolve, reject) => {
+          const startedAt = Date.now();
+          const sock = net.createConnection({ host: proxy.host, port: proxy.port });
+          sock.on('close', () => {
+            resolve(Date.now() - startedAt < 1500);
+          });
+          sock.on('error', reject);
+        });
+        expect(closedQuickly).toBe(true);
+      } finally {
+        await proxy.close();
+      }
+    });
+
+    it('S-5: hebrah skill honors --path and sanitizes/redacts live and bundled skill output', async () => {
+      const skillCmd = (await import('../src/commands/skill.js')).default;
+      const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      try {
+        // 1. `hebrah skill --path`
+        const pathCode = await skillCmd(['--path'], { _argv: ['--path'] });
+        expect(pathCode).toBe(0);
+        const printedPath = String(logSpy.mock.calls.at(-1)?.[0] ?? '');
+        expect(printedPath).toMatch(/skill\.md$/);
+
+        // 2. `hebrah skill --refresh` sanitizes terminal escapes and redacts tokens
+        const fetchMock = vi.fn().mockResolvedValue(
+          new Response(
+            '# Skill Doc\n\x1b]52;c;ZWNobyBoYWNrZWQ=\x07\x9b2JToken: hb_live_leakedSkillToken1234567890\n',
+            { status: 200 }
+          )
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const refreshCode = await skillCmd([], { _argv: ['--refresh'] });
+        expect(refreshCode).toBe(0);
+        const written = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(written).not.toContain('\x1b]52');
+        expect(written).not.toContain('\x9b');
+        expect(written).not.toContain('hb_live_leakedSkillToken1234567890');
+        expect(written).toContain('[REDACTED_HEBRAH_TOKEN]');
+      } finally {
+        writeSpy.mockRestore();
+      }
+    });
+
+    it('S-6: hebrah env status and wireguard sanitize terminal escape sequences in direct console.log fields', async () => {
+      vi.spyOn(api, 'get').mockResolvedValueOnce({
+        id: 'env_sec_status',
+        org_id: 'org_1',
+        name: 'Clinic\x1b]52;c;evil\x07Name',
+        clinic_type: 'ambulatory_clinic',
+        patient_cohort: 'adult',
+        status: 'active',
+        addons: ['postgres'],
+        patient_count: 10,
+        bed_count: 5,
+        endpoints: {},
+        database_modules: [
+          {
+            type: 'postgres\x1b]52;c;evil\x07',
+            status: 'ready\x9b2J',
+            port: 5432,
+            size_mb: 12,
+            tables_count: 6
+          }
+        ],
+        connected_agents: [
+          {
+            agent_id: 'ag_1\x1b]8;;https://evil.com\x07Click\x1b]8;;\x07',
+            name: 'Agent\x9d52;c;evil\x07Bot',
+            connected_at: '2026-10-18T00:00:00Z\x1b[2J'
+          }
+        ],
+        queries_run: 1,
+        bytes_egressed: 100,
+        hourly_rate_cents: 5,
+        total_cost_cents: 5,
+        created_at: '2026-10-18T00:00:00Z'
+      });
+
+      const code = await env(['status', 'env_sec_status'], { _argv: ['status', 'env_sec_status'] });
+      expect(code).toBe(0);
+
+      const allOut = logSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(allOut).not.toContain(']52;');
+      expect(allOut).not.toContain(']8;;');
+      expect(allOut).not.toContain('\x1b[2J');
+      expect(allOut).not.toContain('\x9b');
+      expect(allOut).not.toContain('\x9d');
+      expect(allOut).toContain('ClinicName');
+      expect(allOut).toContain('AgentBot');
+    });
+  });
 });
-
-

@@ -70,8 +70,8 @@ function assertNotSymlink(targetPath: string): void {
     if (st.isSymbolicLink()) {
       throw new Error(`Security error: refusing to access symbolic link at ${targetPath}`);
     }
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') return;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return;
     throw err;
   }
 }
@@ -111,8 +111,8 @@ export function loadCredentials(): Credentials | null {
       return null;
     }
     return parsed as Credentials;
-  } catch (err: any) {
-    if (err?.message?.startsWith('Security error:')) {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.startsWith('Security error:')) {
       throw err;
     }
     return null;

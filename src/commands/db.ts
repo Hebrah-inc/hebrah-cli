@@ -10,11 +10,9 @@
  */
 
 import { parseArgs } from 'node:util';
-import { writeFileSync, existsSync, lstatSync, chmodSync } from 'node:fs';
 import { resolve as resolvePath, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { api, safeId } from '../api/client.js';
-import { loadCredentials } from '../config/credentials.js';
 import {
   success,
   info,
@@ -33,18 +31,30 @@ import {
   redactSecrets
 } from '../output/format.js';
 import { getArgv } from '../util/args.js';
-import { isPortAvailable, startPgWireProxy } from '../util/pgProxy.js';
+import {
+  generateEphemeralPgPassword,
+  isPortAvailable,
+  startPgWireProxy
+} from '../util/pgProxy.js';
+import {
+  type EnvironmentSummary,
+  normalizeWireguardKey,
+  normalizeWireguardConfig,
+  normalizeWireguardFilename,
+  redactWireguardPrivateKey,
+  writeWireguardConfigFile,
+  ensureEnvironmentOrigin,
+  resolveEnvironmentId
+} from '../util/wireguard.js';
 
-interface EnvironmentSummary {
-  id: string;
-  name: string;
-  status: string;
-  clinic_type?: string;
-  addons?: string[];
-  database_packs?: string[];
-  wireguard_ip?: string;
-  db_schema?: string;
-}
+export {
+  normalizeWireguardKey,
+  normalizeWireguardConfig,
+  normalizeWireguardFilename,
+  redactWireguardPrivateKey,
+  writeWireguardConfigFile,
+  ensureEnvironmentOrigin
+};
 
 interface WireguardConfigResult {
   environment_id: string;
@@ -67,152 +77,6 @@ interface DbQueryResult {
   duration_ms: number;
 }
 
-export function normalizeWireguardKey(rawKey: string, clampPrivate = false): string {
-  const trimmed = rawKey.trim();
-  if (trimmed.length !== 43 && trimmed.length !== 44) return trimmed;
-  const stdB64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = stdB64 + '='.repeat((4 - (stdB64.length % 4)) % 4);
-  try {
-    const buf = Buffer.from(padded, 'base64');
-    if (buf.length === 32) {
-      if (clampPrivate) {
-        buf[0] &= 248;
-        buf[31] &= 127;
-        buf[31] |= 64;
-      }
-      return buf.toString('base64');
-    }
-  } catch {
-    // fallback if not 32-byte base64
-  }
-  return padded;
-}
-
-export function normalizeWireguardConfig(configText: string): string {
-  if (!configText) return configText;
-  return configText
-    .replace(/^(\s*PrivateKey\s*=\s*)([^\r\n#]+)$/gim, (_m, prefix: string, key: string) => {
-      if (key.includes('<redacted')) return `${prefix}${key}`;
-      return `${prefix}${normalizeWireguardKey(key, true)}`;
-    })
-    .replace(/^(\s*PublicKey\s*=\s*)([^\r\n#]+)$/gim, (_m, prefix: string, key: string) => {
-      return `${prefix}${normalizeWireguardKey(key, false)}`;
-    })
-    .replace(/^(\s*Endpoint\s*=\s*)vpn\.hebrah\.internal:(\d+)\s*$/gim, '$1127.0.0.1:$2')
-    .replace(/^\s*DNS\s*=\s*10\.42\.0\.1\s*\r?\n/gim, '');
-}
-
-export function normalizeWireguardFilename(rawFilename: string | undefined, envId: string): string {
-  const fallback = `hb-env-${envId.replace(/-/g, '').slice(0, 8)}.conf`;
-  if (!rawFilename) return fallback;
-  const base = basename(rawFilename.trim());
-  const stem = base.replace(/\.conf$/i, '');
-  if (!stem || stem.length > 15 || !/^[a-zA-Z0-9_-]+$/.test(stem)) {
-    return fallback;
-  }
-  return `${stem}.conf`;
-}
-
-export function redactWireguardPrivateKey(configText: string): string {
-  return configText.replace(
-    /^(\s*PrivateKey\s*=\s*).+$/gim,
-    '$1<redacted — use --out ./wg.conf or --reveal-private-key>'
-  );
-}
-
-export function writeWireguardConfigFile(outPath: string, configText: string): string {
-  const resolved = resolvePath(outPath);
-  if (existsSync(resolved)) {
-    const st = lstatSync(resolved);
-    if (st.isSymbolicLink()) {
-      throw new Error(
-        `Security error: Refusing to write WireGuard private key to symlink (${resolved})`
-      );
-    }
-  }
-  const cleanConfig = sanitizeTerminalText(configText);
-  writeFileSync(resolved, cleanConfig, { encoding: 'utf-8', mode: 0o600 });
-  try {
-    chmodSync(resolved, 0o600);
-  } catch {
-    // Ignore on non-POSIX filesystems
-  }
-  return resolved;
-}
-
-export async function ensureEnvironmentOrigin(
-  explicitId?: string,
-  options?: Record<string, unknown>
-): Promise<void> {
-  if (
-    process.env.VITEST ||
-    options?.['api-url'] ||
-    process.env.HEBRAH_API_URL ||
-    api.getBaseUrl() === 'http://localhost:8000'
-  ) {
-    return;
-  }
-
-  const savedApiUrl = loadCredentials()?.apiUrl ?? '';
-  const allowLocalFallback =
-    process.env.HEBRAH_ALLOW_LOCAL_FALLBACK === '1' ||
-    savedApiUrl.includes('localhost') ||
-    savedApiUrl.includes('127.0.0.1');
-
-  if (!allowLocalFallback) {
-    return;
-  }
-
-  const probePath = explicitId
-    ? `/v1/environments/${safeId(explicitId, 'environment_id')}`
-    : '/v1/environments';
-
-  try {
-    const res = await api.get<unknown>(probePath, undefined, { timeoutMs: 3500 });
-    if (explicitId && res) return;
-    if (!explicitId && Array.isArray(res) && res.length > 0) return;
-  } catch {
-    // Primary origin didn't have the environment or wasn't reachable — probe local dev control plane
-  }
-
-  const prevUrl = api.getBaseUrl();
-  try {
-    api.setBaseUrl('http://localhost:8000');
-    await api.get<unknown>(probePath, undefined, { timeoutMs: 2000 });
-  } catch {
-    api.setBaseUrl(prevUrl);
-  }
-}
-
-async function resolveEnvironmentId(
-  explicitId?: string,
-  options?: Record<string, unknown>
-): Promise<string> {
-  await ensureEnvironmentOrigin(explicitId, options);
-  if (explicitId && explicitId.trim().length > 0) {
-    return explicitId.trim();
-  }
-  if (process.env.HEBRAH_ENV_ID && process.env.HEBRAH_ENV_ID.trim().length > 0) {
-    return process.env.HEBRAH_ENV_ID.trim();
-  }
-  const saved = loadCredentials()?.defaultEnvId;
-  if (saved && saved.trim().length > 0) {
-    return saved.trim();
-  }
-  const res = await api.get<
-    EnvironmentSummary[] | { environments: EnvironmentSummary[] }
-  >('/v1/environments');
-  const envs = Array.isArray(res) ? res : (res?.environments ?? []);
-  const active =
-    envs.find((e) => e.status === 'active' || e.status === 'running') ?? envs[0];
-  if (!active) {
-    throw new Error(
-      'No active Isolated Health Environment found. Pass <environment_id> or run "hebrah env list".'
-    );
-  }
-  return active.id;
-}
-
 function showDbHelp(): void {
   console.log(`hebrah db — Database tunnel, local PostgreSQL proxy, WireGuard VPN & SQL tools
 
@@ -225,6 +89,7 @@ Usage:
 
 Options:
   --port, -p <port>        Local TCP port for "hebrah db proxy" (default: 5432, auto-falls back to 15432 if busy)
+  --no-auth                Disable ephemeral per-session password authentication on 127.0.0.1 proxy
   --no-listen              Print GUI connection coordinates and exit without keeping TCP listener open
   --out, -o <path>         Write WireGuard .conf to file (chmod 0600) instead of stdout
   --up                     Immediately activate WireGuard tunnel via wg-quick or WireGuard.app
@@ -249,6 +114,7 @@ export default async function dbCommand(
     args: fullArgv,
     options: {
       port: { type: 'string', short: 'p' },
+      'no-auth': { type: 'boolean', default: false },
       listen: { type: 'boolean' },
       'no-listen': { type: 'boolean' },
       out: { type: 'string', short: 'o' },
@@ -308,12 +174,16 @@ export default async function dbCommand(
       }
 
       const shortDb = `clinic_${envId.replace(/-/g, '_').slice(0, 12)}`;
+      const disableAuth = Boolean(values['no-auth']);
+      const ephemeralPassword = disableAuth ? null : generateEphemeralPgPassword();
       const connectionInfo = {
         environment_id: envId,
         host: '127.0.0.1',
         port: bindPort,
         database: shortDb,
         user: 'hebrah_readonly',
+        password: ephemeralPassword,
+        auth_mode: ephemeralPassword ? 'ephemeral_password' : 'none',
         ssl_mode: 'disable',
         jdbc_url: `jdbc:postgresql://127.0.0.1:${bindPort}/${shortDb}`,
         connection_string: `postgresql://hebrah_readonly@127.0.0.1:${bindPort}/${shortDb}?sslmode=disable`
@@ -345,10 +215,20 @@ export default async function dbCommand(
         ['Port', bold(String(connectionInfo.port))],
         ['Database', connectionInfo.database],
         ['Username', connectionInfo.user],
-        ['Password', dim('(any / blank — authenticated via Hebrah CLI session)')],
+        [
+          'Password',
+          ephemeralPassword
+            ? `${bold(ephemeralPassword)} ${dim('(ephemeral per-session token)')}`
+            : dim('(disabled via --no-auth)')
+        ],
         ['JDBC URL', cyan(connectionInfo.jdbc_url)],
         ['Connection URL', cyan(connectionInfo.connection_string)],
-        ['psql Quickstart', `psql "${connectionInfo.connection_string}"`]
+        [
+          'psql Quickstart',
+          ephemeralPassword
+            ? `PGPASSWORD=${ephemeralPassword} psql "${connectionInfo.connection_string}"`
+            : `psql "${connectionInfo.connection_string}"`
+        ]
       ]);
 
       if (shouldSkipListener) {
@@ -359,6 +239,8 @@ export default async function dbCommand(
         envId,
         port: bindPort,
         database: shortDb,
+        password: ephemeralPassword,
+        requirePassword: !disableAuth,
         client: api,
         onQuery: (sqlText, rowCount, durationMs) => {
           const safeSql = redactSecrets(sanitizeTerminalText(sqlText));
@@ -591,7 +473,7 @@ export default async function dbCommand(
       const tables = res.tables ?? [];
       console.log(
         bold(
-          `Attached Database Tables — Environment ${res.environment_id || envId}`
+          `Attached Database Tables — Environment ${sanitizeTerminalText(String(res.environment_id || envId))}`
         )
       );
       console.log();

@@ -39,12 +39,13 @@ import { hostname, platform } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { api, safeId, CLI_VERSION } from '../api/client.js';
-import { loadCredentials, updateCredentials } from '../config/credentials.js';
+import { updateCredentials } from '../config/credentials.js';
 import {
   normalizeWireguardConfig,
   redactWireguardPrivateKey,
-  writeWireguardConfigFile
-} from './db.js';
+  writeWireguardConfigFile,
+  resolveStaticEnvId as resolveEnvId
+} from '../util/wireguard.js';
 import {
   success,
   info,
@@ -65,16 +66,6 @@ import {
   redactSecrets
 } from '../output/format.js';
 import { getArgv } from '../util/args.js';
-
-function resolveEnvId(explicitId?: string): string | undefined {
-  if (explicitId && explicitId.trim().length > 0) {
-    return explicitId.trim();
-  }
-  if (process.env.HEBRAH_ENV_ID && process.env.HEBRAH_ENV_ID.trim().length > 0) {
-    return process.env.HEBRAH_ENV_ID.trim();
-  }
-  return loadCredentials()?.defaultEnvId;
-}
 
 // ---------------------------------------------------------------------------
 // Types matching hebrah-api environments endpoints
@@ -135,12 +126,14 @@ export interface WireguardConfigResult {
   client_ip: string;
   server_endpoint: string;
   config_text: string;
+  config?: string;
 }
 
 export interface ClinicScenarioResult {
   ok: boolean;
   scenario: string;
   hl7_message: string;
+  hl7_event?: string;
   websocket_broadcast: boolean;
 }
 
@@ -434,20 +427,18 @@ async function connectEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       name: { type: 'string' },
       'agent-name': { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env connect: environment_id required');
     error('Usage: hebrah env connect <environment_id> [--agent-name <name>] [--json]');
@@ -518,18 +509,16 @@ async function statusEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env status: environment_id required');
     error('Usage: hebrah env status <environment_id> [--json]');
@@ -549,7 +538,7 @@ async function statusEnv(
     else if (detail.status === 'paused') statusDisplay = yellow('paused');
     else if (detail.status === 'destroyed') statusDisplay = red('destroyed');
 
-    console.log(bold(`Environment: ${detail.name}`));
+    console.log(bold(`Environment: ${sanitizeTerminalText(String(detail.name ?? ''))}`));
     console.log();
     kv([
       ['ID', detail.id],
@@ -578,7 +567,9 @@ async function statusEnv(
       console.log();
       console.log(bold('Attached Database Modules:'));
       for (const db of detail.database_modules) {
-        console.log(`  • ${bold(db.type)}: ${green(db.status)} · Port ${db.port} · ${db.size_mb} MB (${db.tables_count} tables)`);
+        console.log(
+          `  • ${bold(sanitizeTerminalText(String(db.type ?? '')))}: ${green(sanitizeTerminalText(String(db.status ?? '')))} · Port ${sanitizeTerminalText(String(db.port ?? ''))} · ${sanitizeTerminalText(String(db.size_mb ?? ''))} MB (${sanitizeTerminalText(String(db.tables_count ?? ''))} tables)`
+        );
       }
     }
 
@@ -586,7 +577,9 @@ async function statusEnv(
       console.log();
       console.log(bold('Active AI Agents:'));
       for (const ag of detail.connected_agents) {
-        console.log(`  • ${cyan(ag.name)} (${ag.agent_id}) connected at ${ag.connected_at}`);
+        console.log(
+          `  • ${cyan(sanitizeTerminalText(String(ag.name ?? '')))} (${sanitizeTerminalText(String(ag.agent_id ?? ''))}) connected at ${sanitizeTerminalText(String(ag.connected_at ?? ''))}`
+        );
       }
     }
 
@@ -606,18 +599,16 @@ async function pauseEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env pause: environment_id required');
     error('Usage: hebrah env pause <environment_id>');
@@ -649,18 +640,16 @@ async function resumeEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env resume: environment_id required');
     error('Usage: hebrah env resume <environment_id>');
@@ -692,19 +681,17 @@ async function destroyEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       yes: { type: 'boolean', short: 'y', default: false },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env destroy: environment_id required');
     error('Usage: hebrah env destroy <environment_id> [--yes]');
@@ -753,20 +740,8 @@ async function queryEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const firstPositional = argv.find((a) => !a.startsWith('-'));
-  // If firstPositional looks like SQL (contains whitespace or starts with SELECT/WITH/SHOW/EXPLAIN),
-  // treat it as the SQL query and resolve envId from defaultEnvId.
-  const firstLooksLikeSql =
-    typeof firstPositional === 'string' &&
-    (/\s/.test(firstPositional.trim()) ||
-      /^(select|with|show|explain|insert|update|delete)\b/i.test(firstPositional.trim()));
-
-  const rawEnvId = firstLooksLikeSql ? undefined : firstPositional;
-  const remaining = rawEnvId ? argv.filter((a) => a !== rawEnvId) : argv;
-
-  // The first non-flag positional in remaining is the SQL query if not passed via --sql
   const { values, positionals } = parseArgs({
-    args: remaining,
+    args: argv,
     options: {
       sql: { type: 'string' },
       addon: { type: 'string', default: 'postgres' },
@@ -776,8 +751,19 @@ async function queryEnv(
     strict: false
   });
 
+  const firstPositional = positionals[0];
+  // If firstPositional looks like SQL (contains whitespace or starts with SELECT/WITH/SHOW/EXPLAIN),
+  // treat it as the SQL query and resolve envId from defaultEnvId.
+  const firstLooksLikeSql =
+    typeof firstPositional === 'string' &&
+    (/\s/.test(firstPositional.trim()) ||
+      /^(select|with|show|explain|insert|update|delete|pragma|match)\b/i.test(firstPositional.trim()));
+
+  const rawEnvId = firstLooksLikeSql ? undefined : firstPositional;
+  const positionalSql = firstLooksLikeSql ? firstPositional : positionals[1];
+
   const envId = resolveEnvId(rawEnvId);
-  const sql = values.sql ?? positionals[0];
+  const sql = typeof values.sql === 'string' ? values.sql : positionalSql;
 
   if (!envId || !sql) {
     error('hebrah env query: environment_id and SQL query required');
@@ -832,20 +818,18 @@ async function wireguardEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       out: { type: 'string' },
       'reveal-private-key': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env wireguard: environment_id required');
     error('Usage: hebrah env wireguard <environment_id> [--out <file.conf>] [--reveal-private-key] [--json]');
@@ -860,7 +844,7 @@ async function wireguardEnv(
     );
 
     const configText = normalizeWireguardConfig(
-      wg.config_text || (wg as any).config || ''
+      wg.config_text || wg.config || ''
     );
     const outPath = typeof values.out === 'string' ? values.out : undefined;
 
@@ -870,7 +854,7 @@ async function wireguardEnv(
         const safeConfig = revealKey ? configText : redactWireguardPrivateKey(configText);
         json({
           ...wg,
-          ...(('config' in (wg as any)) ? { config: safeConfig } : {}),
+          ...('config' in wg ? { config: safeConfig } : {}),
           config_text: safeConfig,
           saved_to: outPath,
           mode: '0600'
@@ -888,15 +872,19 @@ async function wireguardEnv(
       const safeConfig = revealKey ? configText : redactWireguardPrivateKey(configText);
       json({
         ...wg,
-        ...(('config' in (wg as any)) ? { config: safeConfig } : {}),
+        ...('config' in wg ? { config: safeConfig } : {}),
         config_text: safeConfig
       });
       return 0;
     }
 
-    console.log(bold(`WireGuard Mesh Tunnel Config — ${envId}:`));
+    console.log(bold(`WireGuard Mesh Tunnel Config — ${sanitizeTerminalText(envId)}:`));
     console.log(dim('──────────────────────────────────────────────────────────────────'));
-    console.log(revealKey ? configText : redactWireguardPrivateKey(configText));
+    console.log(
+      sanitizeTerminalText(
+        revealKey ? configText : redactWireguardPrivateKey(configText)
+      )
+    );
     console.log(dim('──────────────────────────────────────────────────────────────────'));
     console.log();
     info('Save full configuration with private key using "--out ./hebrah.conf" (writes with 0600 permissions).');
@@ -916,10 +904,8 @@ async function scenarioEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       type: { type: 'string' },
       scenario: { type: 'string' },
@@ -928,11 +914,11 @@ async function scenarioEnv(
       notes: { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   const scenarioType =
     typeof values.scenario === 'string'
       ? values.scenario
@@ -972,7 +958,7 @@ async function scenarioEnv(
 
     success(`Clinical scenario triggered: ${bold(res.scenario)}`);
     console.log();
-    const hl7Text = (res.hl7_message ?? (res as any).hl7_event ?? '') as string;
+    const hl7Text = res.hl7_message ?? res.hl7_event ?? '';
     kv([
       ['Scenario', res.scenario],
       ['WebSocket Broadcast', res.websocket_broadcast ? green('delivered to subscribers') : 'none'],
@@ -994,12 +980,8 @@ async function dbProxyEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const nonFlags = argv.filter((a) => !a.startsWith('-'));
-  const rawEnvId = nonFlags[0];
-  const rawPositionalPort = nonFlags[1];
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId && a !== rawPositionalPort),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       port: { type: 'string' },
       addon: { type: 'string', default: 'postgres' },
@@ -1008,6 +990,13 @@ async function dbProxyEnv(
     allowPositionals: true,
     strict: false
   });
+
+  let rawEnvId: string | undefined = positionals[0];
+  let rawPositionalPort: string | undefined = positionals[1];
+  if (rawEnvId && /^\d{2,5}$/.test(rawEnvId) && !rawPositionalPort) {
+    rawPositionalPort = rawEnvId;
+    rawEnvId = undefined;
+  }
 
   const envId = resolveEnvId(rawEnvId);
   if (!envId) {
@@ -1047,7 +1036,11 @@ async function dbProxyEnv(
       return 0;
     }
 
-    console.log(bold(`Developer Database GUI Coordinates — ${detail.name} (${detail.id})`));
+    console.log(
+      bold(
+        `Developer Database GUI Coordinates — ${sanitizeTerminalText(String(detail.name ?? ''))} (${sanitizeTerminalText(String(detail.id ?? ''))})`
+      )
+    );
     console.log();
     kv([
       ['Host (Local Proxy)', `127.0.0.1 (via "hebrah db proxy ${detail.id} ${port}")`],
@@ -1080,18 +1073,16 @@ async function tablesEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env tables: environment_id required');
     error('Usage: hebrah env tables [environment_id] [--json]');
@@ -1119,7 +1110,11 @@ async function tablesEnv(
       return 0;
     }
 
-    console.log(bold(`Isolated Database Schema — ${res.schema} (${res.environment_id})`));
+    console.log(
+      bold(
+        `Isolated Database Schema — ${sanitizeTerminalText(String(res.schema ?? ''))} (${sanitizeTerminalText(String(res.environment_id ?? ''))})`
+      )
+    );
     console.log();
     const tablesList = res.tables ?? [];
     if (tablesList.length === 0) {
@@ -1154,10 +1149,8 @@ async function patientsEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       department: { type: 'string' },
       diagnosis: { type: 'string' },
@@ -1166,11 +1159,11 @@ async function patientsEnv(
       limit: { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env patients: environment_id required');
     error(
@@ -1241,10 +1234,8 @@ async function admitPatientsEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       count: { type: 'string', default: '10' },
       department: { type: 'string' },
@@ -1253,11 +1244,11 @@ async function admitPatientsEnv(
       acuity: { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env admit: environment_id required');
     error(
@@ -1317,21 +1308,19 @@ async function logsEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       limit: { type: 'string', default: '25' },
       'event-type': { type: 'string' },
       'actor-type': { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env logs: environment_id required');
     error('Usage: hebrah env logs [environment_id] [--limit 25] [--event-type <type>] [--json]');
@@ -1392,17 +1381,8 @@ async function studioEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const firstPositional = argv.find((a) => !a.startsWith('-'));
-  // If firstPositional looks like a natural-language prompt (contains whitespace),
-  // resolve envId from defaultEnvId and treat firstPositional as the message.
-  const firstLooksLikePrompt =
-    typeof firstPositional === 'string' && /\s/.test(firstPositional.trim());
-
-  const rawEnvId = firstLooksLikePrompt ? undefined : firstPositional;
-  const remaining = rawEnvId ? argv.filter((a) => a !== rawEnvId) : argv;
-
   const { values, positionals } = parseArgs({
-    args: remaining,
+    args: argv,
     options: {
       prompt: { type: 'string' },
       message: { type: 'string' },
@@ -1413,13 +1393,22 @@ async function studioEnv(
     strict: false
   });
 
+  const firstPositional = positionals[0];
+  // If firstPositional looks like a natural-language prompt (contains whitespace),
+  // resolve envId from defaultEnvId and treat firstPositional as the message.
+  const firstLooksLikePrompt =
+    typeof firstPositional === 'string' && /\s/.test(firstPositional.trim());
+
+  const rawEnvId = firstLooksLikePrompt ? undefined : firstPositional;
+  const positionalPrompt = firstLooksLikePrompt ? firstPositional : positionals[1];
+
   const envId = resolveEnvId(rawEnvId);
   const message =
     typeof values.prompt === 'string'
       ? values.prompt
       : typeof values.message === 'string'
         ? values.message
-        : positionals[0];
+        : positionalPrompt;
 
   if (!envId || !message) {
     error('hebrah env studio: environment_id and prompt message required');
@@ -1482,10 +1471,8 @@ async function openDataEnv(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const rawEnvId = argv.find((a) => !a.startsWith('-'));
-
-  const { values } = parseArgs({
-    args: argv.filter((a) => a !== rawEnvId),
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       search: { type: 'string' },
       query: { type: 'string' },
@@ -1493,11 +1480,11 @@ async function openDataEnv(
       specialty: { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false,
+    allowPositionals: true,
     strict: false
   });
 
-  const envId = resolveEnvId(rawEnvId);
+  const envId = resolveEnvId(positionals[0]);
   if (!envId) {
     error('hebrah env open-data: environment_id required');
     error(

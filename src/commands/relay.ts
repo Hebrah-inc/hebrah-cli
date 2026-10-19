@@ -234,12 +234,15 @@ The printed token is consumed once. Pipe it directly into:
     console.log(dim(`    --postgres-url ${shellQuoteSingle(safeTargetDisplay)}`));
     console.log('');
     return 0;
-  } catch (err: any) {
-    if (err.suggestion) {
-      error(`hebrah relay enroll: ${err.message}`);
-      error(`Hint: ${err.suggestion}`);
-    } else {
-      error(`hebrah relay enroll: ${err.message ?? 'unknown error'}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'unknown error';
+    const suggestion =
+      err && typeof err === 'object' && 'suggestion' in err && typeof (err as { suggestion?: unknown }).suggestion === 'string'
+        ? (err as { suggestion: string }).suggestion
+        : undefined;
+    error(`hebrah relay enroll: ${msg}`);
+    if (suggestion) {
+      error(`Hint: ${suggestion}`);
     }
     return 4;
   }
@@ -319,8 +322,8 @@ async function listRelays(
     console.log(dim(`${filtered.length} relay(s)${values.all ? ' (all)' : ' (active only — pass --all to include revoked)'}`));
     console.log(dim('Details: hebrah relay status <relay_id>'));
     return 0;
-  } catch (err: any) {
-    error(`hebrah relay list: ${err.message ?? 'unknown error'}`);
+  } catch (err: unknown) {
+    error(`hebrah relay list: ${err instanceof Error ? err.message : 'unknown error'}`);
     return 4;
   }
 }
@@ -334,7 +337,14 @@ async function relayStatus(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const relayId = argv.find((a) => !a.startsWith('-')) ?? args[0];
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: { json: { type: 'boolean', default: false } },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const relayId = positionals[0] ?? args[0];
   if (!relayId) {
     error('hebrah relay status: relay_id required');
     error('Usage: hebrah relay status <relay_id>');
@@ -346,13 +356,6 @@ async function relayStatus(
     error((err as Error).message);
     return 1;
   }
-  const flagsOnly = argv.filter((a) => a !== relayId);
-
-  const { values } = parseArgs({
-    args: flagsOnly,
-    options: { json: { type: 'boolean', default: false } },
-    allowPositionals: false
-  });
 
   try {
     const relays = await api.get<RelaySummary[]>('/v1/relays');
@@ -388,8 +391,8 @@ async function relayStatus(
       console.log(dim(`  (${matches.length} cert rows for this relay — showing latest; pass --all to list)`));
     }
     return 0;
-  } catch (err: any) {
-    error(`hebrah relay status: ${err.message ?? 'unknown error'}`);
+  } catch (err: unknown) {
+    error(`hebrah relay status: ${err instanceof Error ? err.message : 'unknown error'}`);
     return 4;
   }
 }
@@ -403,7 +406,17 @@ async function revokeRelay(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const relayId = argv.find((a) => !a.startsWith('-')) ?? args[0];
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      reason: { type: 'string' },
+      yes: { type: 'boolean', short: 'y', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const relayId = positionals[0] ?? args[0];
   if (!relayId) {
     error('hebrah relay revoke: relay_id required');
     error('Usage: hebrah relay revoke <relay_id> [--reason <text>] [--yes]');
@@ -415,16 +428,6 @@ async function revokeRelay(
     error((err as Error).message);
     return 1;
   }
-  const flagsOnly = argv.filter((a) => a !== relayId);
-
-  const { values } = parseArgs({
-    args: flagsOnly,
-    options: {
-      reason: { type: 'string' },
-      yes: { type: 'boolean', short: 'y', default: false }
-    },
-    allowPositionals: false
-  });
 
   try {
     const skipConfirm = values.yes === true || !input.isTTY;
@@ -452,12 +455,14 @@ async function revokeRelay(
     success(`✓ Relay ${relayId} revoked.`);
     console.log(dim('  (the relay will fail its next mTLS handshake; new certs cannot be minted)'));
     return 0;
-  } catch (err: any) {
-    if (err.statusCode === 404) {
+  } catch (err: unknown) {
+    const statusCode =
+      err && typeof err === 'object' && 'statusCode' in err ? (err as { statusCode?: unknown }).statusCode : undefined;
+    if (statusCode === 404) {
       warn(`hebrah relay revoke: relay "${relayId}" not found in your org`);
       return 4;
     }
-    error(`hebrah relay revoke: ${err.message ?? 'unknown error'}`);
+    error(`hebrah relay revoke: ${err instanceof Error ? err.message : 'unknown error'}`);
     return 4;
   }
 }

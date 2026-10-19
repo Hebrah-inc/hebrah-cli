@@ -24,20 +24,20 @@ export default async function status(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const connId = positionals[0] ?? args[0];
   if (!connId) {
     error('hebrah status: connection_id required');
     return 1;
   }
-
-  const flagOnly = argv.filter((a) => a !== connId);
-  const { values } = parseArgs({
-    args: flagOnly,
-    options: {
-      json: { type: 'boolean', default: false }
-    },
-    allowPositionals: false
-  });
 
   try {
     const detail = await api.get<ConnectionDetail>(`/v1/connections/${safeId(connId, 'connection_id')}`);

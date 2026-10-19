@@ -25,21 +25,21 @@ export default async function inspect(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const target = argv.find((a) => !a.startsWith('-')) ?? args[0];
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const target = positionals[0] ?? args[0];
   if (!target) {
     error('hebrah inspect: target required');
     error('Usage: hebrah inspect <target>');
     return 1;
   }
-
-  const flagOnly = argv.filter((a) => a !== target);
-  const { values } = parseArgs({
-    args: flagOnly,
-    options: {
-      json: { type: 'boolean', default: false }
-    },
-    allowPositionals: false
-  });
 
   try {
     const detail = await api.get<TargetDetail>(

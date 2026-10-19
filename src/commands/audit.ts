@@ -33,15 +33,33 @@ export default async function audit(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  // First non-flag token is subcommand (verify|export|help) or connId
-  const tokens = argv.filter((a) => !a.startsWith('-'));
-  const subcommand = tokens[0];
-  const connId = tokens[1] ?? tokens[0];
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      limit: { type: 'string', default: '50' },
+      since: { type: 'string' },
+      event: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const subcommand = positionals[0] ?? args[0];
+  const connId = positionals[1] ?? positionals[0] ?? args[1] ?? args[0];
 
   if (subcommand === 'verify') {
+    if (!positionals[1] && !args[1]) {
+      error('hebrah audit verify: connection_id required');
+      return 1;
+    }
     return auditVerify(connId, options);
   }
   if (subcommand === 'export') {
+    if (!positionals[1] && !args[1]) {
+      error('hebrah audit export: connection_id required');
+      return 1;
+    }
     return auditExport(connId, options);
   }
   if (subcommand === 'help' || !subcommand) {
@@ -53,27 +71,15 @@ export default async function audit(
   }
 
   // Default: show events
-  return auditShow(connId, options);
+  return auditShow(connId, values);
 }
 
-async function auditShow(connId: string, options: Record<string, unknown>): Promise<number> {
-  const argv = getArgv(options, []);
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      limit: { type: 'string', default: '50' },
-      since: { type: 'string' },
-      event: { type: 'string' },
-      json: { type: 'boolean', default: false }
-    },
-    allowPositionals: false
-  });
-
+async function auditShow(connId: string, values: Record<string, unknown>): Promise<number> {
   const params: Record<string, string> = {
-    limit: values.limit as string
+    limit: String(values.limit ?? '50')
   };
-  if (values.since) params.since = values.since as string;
-  if (values.event) params.event_type = values.event as string;
+  if (values.since) params.since = String(values.since);
+  if (values.event) params.event_type = String(values.event);
 
   try {
     const events = await api.get<AuditEvent[]>(

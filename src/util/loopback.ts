@@ -43,8 +43,8 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
 };
 
-function isValidLoopbackHostHeader(hostHeader: string | undefined): boolean {
-  if (!hostHeader) return true;
+export function isValidLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
   const trimmed = hostHeader.trim().toLowerCase();
   if (!trimmed) return false;
   try {
@@ -212,6 +212,10 @@ export async function startLoopbackAuth(): Promise<LoopbackAuthServer> {
   });
 
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    req.socket.setTimeout(5_000, () => {
+      req.destroy();
+    });
+
     // 1. DNS Rebinding guard: reject non-loopback Host headers without aborting the listener
     if (!isValidLoopbackHostHeader(req.headers.host)) {
       res.writeHead(403, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });

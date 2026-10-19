@@ -6,7 +6,7 @@
 //   hebrah query conn_uuid --sql "..." --max-rows 100 --json
 
 import { parseArgs } from 'node:util';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, lstatSync } from 'node:fs';
 import { api, safeId } from '../api/client.js';
 import { json, table, dim, green, yellow, error } from '../output/format.js';
 import { getArgv } from '../util/args.js';
@@ -28,32 +28,34 @@ export default async function query(
   options: Record<string, unknown>
 ): Promise<number> {
   const argv = getArgv(options, args);
-  const connId = argv.find((a) => !a.startsWith('-')) ?? args[0];
-  if (!connId) {
-    error('hebrah query: connection_id required');
-    error('Usage: hebrah query <connection_id> --sql "SELECT ..."');
-    return 1;
-  }
-
-  // Re-parse the argv with the positional removed so parseArgs (with
-  // allowPositionals: false) doesn't reject it.
-  const flagOnly = argv.filter((a) => a !== connId);
-  const { values } = parseArgs({
-    args: flagOnly,
+  const { values, positionals } = parseArgs({
+    args: argv,
     options: {
       sql: { type: 'string' },
       file: { type: 'string' },
       'max-rows': { type: 'string' },
       json: { type: 'boolean', default: false }
     },
-    allowPositionals: false
+    allowPositionals: true,
+    strict: false
   });
+
+  const connId = positionals[0] ?? args[0];
+  if (!connId) {
+    error('hebrah query: connection_id required');
+    error('Usage: hebrah query <connection_id> --sql "SELECT ..."');
+    return 1;
+  }
 
   let sql: string | undefined = values.sql as string | undefined;
   if (!sql && values.file) {
     try {
       const filePath = String(values.file);
-      const st = statSync(filePath);
+      const st = lstatSync(filePath);
+      if (st.isSymbolicLink()) {
+        error(`hebrah query: refusing to read symbolic link for --file (${filePath})`);
+        return 1;
+      }
       if (!st.isFile()) {
         error(`hebrah query: --file must point to a regular file (${filePath})`);
         return 1;
