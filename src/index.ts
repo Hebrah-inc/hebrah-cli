@@ -168,9 +168,28 @@ Pricing: https://hebrah.com/pricing
 `);
 }
 
-main().then((code) => process.exit(code)).catch((err) => {
-  console.error('hebrah: fatal error');
-  const rawMsg = err instanceof Error ? err.message : String(err);
-  console.error(redactSecrets(sanitizeTerminalText(rawMsg)));
-  process.exit(4);
-});
+function exitWithFlush(code: number): void {
+  process.exitCode = code;
+  const flushStream = (stream: NodeJS.WriteStream): Promise<void> =>
+    new Promise((resolve) => {
+      if (!stream.writableNeedDrain) {
+        resolve();
+        return;
+      }
+      stream.once('drain', () => resolve());
+      stream.once('error', () => resolve());
+    });
+
+  void Promise.all([flushStream(process.stdout), flushStream(process.stderr)]).finally(() => {
+    process.exit(code);
+  });
+}
+
+main()
+  .then((code) => exitWithFlush(code))
+  .catch((err) => {
+    console.error('hebrah: fatal error');
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    console.error(redactSecrets(sanitizeTerminalText(rawMsg)));
+    exitWithFlush(4);
+  });

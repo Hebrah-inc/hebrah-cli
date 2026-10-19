@@ -51,7 +51,7 @@ function colorize(s: string, color: keyof typeof COLORS): string {
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\bhb_(?:live|test|pat|conn|claim)_[A-Za-z0-9_-]{6,}\b(?!\.\.\.)/g, '[REDACTED_HEBRAH_TOKEN]'],
   [/\benc:v1:[A-Za-z0-9+/=_:-]+/g, 'enc:v1:[REDACTED]'],
-  [/(PrivateKey[ \t]*=[ \t]*)(?!\s*(?:<redacted|\[REDACTED\]))[^\r\n"]+/gi, '$1[REDACTED]'],
+  [/(PrivateKey[ \t]*=[ \t]*)(?!\s*(?:<redacted|\[REDACTED))[^\r\n"\\]+/gi, '$1[REDACTED]'],
   [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]'],
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)([^\s/]+)(@)/gi, '$1[REDACTED]$3']
 ];
