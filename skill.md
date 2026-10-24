@@ -38,11 +38,16 @@ hebrah login
 > **Headless / SSH / Container Note**: Use `hebrah login --headless` for RFC 8628 Device Code flow, or ask the user for a token using **Path B**.
 
 #### Path B — Direct Token Login (`hb_conn_*`, `hb_pat_*`, `hb_live_*`, `hb_test_*`)
-If the user pastes an API key or Personal Access Token from the **Agents & SDKs** tab of their environment:
+If the user pastes an API key or Personal Access Token from the **Agents & SDKs** tab of their environment, pipe it via `--key-stdin` (so secrets never appear in `ps aux`):
 
 ```bash
-hebrah login --key <TOKEN> --app-url https://app.hebrah.com --env-id <ENV_ID>
+printf '%s\n' "$HEBRAH_TOKEN" | hebrah login --key-stdin --app-url https://app.hebrah.com --env-id <ENV_ID>
 ```
+
+#### Canonical Production Endpoints
+- **Dashboard & Claim Portal**: `https://app.hebrah.com`
+- **Control Plane REST API**: `https://api.hebrah.com`
+- **Hosted Streamable HTTP MCP**: `https://mcp.hebrah.com/mcp`
 
 #### Path C — Autonomous $5 Trial Signup (No card required)
 If the user wants you to spin up a brand-new workspace with **$5.00 free credit** (1,000 queries, 50 MB egress, 14-day TTL):
@@ -86,7 +91,7 @@ hebrah env logs <ENV_ID>
 ## CLI Command Summary (`@hebrah/cli` v0.4.6)
 
 ```bash
-hebrah login [--app-url <url>] [--api-url <url>] [--env-id <id>] [--key <token>] [--headless]
+hebrah login [--app-url <url>] [--api-url <url>] [--env-id <id>] [--key-stdin] [--headless]
 hebrah signup --name <org> --email <work-email> [--app-url <url>] [--api-url <url>] [--env-id <id>]
 hebrah whoami                          # Show authenticated org, API endpoint, default environment, and wallet balance
 hebrah env list                        # List isolated health environments
