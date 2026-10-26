@@ -11,6 +11,8 @@ import { redactSecrets, sanitizeTerminalText } from './output/format.js';
 
 // Command registry (Wave 1)
 const COMMANDS: Record<string, CommandDescriptor> = {
+  chat: { description: 'Chat with your Personal Onboarding Concierge & Environment Studio Agent', handler: () => import('./commands/chat.js') },
+  onboard: { description: 'Conversational onboarding & sandbox blueprint design (alias for chat)', handler: () => import('./commands/chat.js') },
   signup: { description: 'Create a new agent account', handler: () => import('./commands/signup.js') },
   login: { description: 'Authenticate via browser or API key', handler: () => import('./commands/login.js') },
   logout: { description: 'Remove local credentials', handler: () => import('./commands/logout.js') },
@@ -114,6 +116,10 @@ Usage:
   hebrah <command> [options]
 
 Commands:
+  Personal Concierge & Studio (Recommended):
+    chat [message]      Chat with your Personal Onboarding Concierge & Environment Studio Agent
+    onboard [message]   Conversational onboarding & blueprint design (alias for chat)
+
   Account:
     signup              Create a new agent account ($5.00 credit)
     login               Authenticate via browser OAuth or API key (--key-stdin, --manual, --env-id)
