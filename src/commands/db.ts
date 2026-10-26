@@ -11,6 +11,7 @@
 
 import { parseArgs } from 'node:util';
 import { resolve as resolvePath, basename } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { api, safeId } from '../api/client.js';
 import {
@@ -38,6 +39,7 @@ import {
 } from '../util/pgProxy.js';
 import {
   type EnvironmentSummary,
+  generateWireguardKeypair,
   normalizeWireguardKey,
   normalizeWireguardConfig,
   normalizeWireguardFilename,
@@ -48,6 +50,7 @@ import {
 } from '../util/wireguard.js';
 
 export {
+  generateWireguardKeypair,
   normalizeWireguardKey,
   normalizeWireguardConfig,
   normalizeWireguardFilename,
@@ -78,30 +81,39 @@ interface DbQueryResult {
 }
 
 function showDbHelp(): void {
-  console.log(`hebrah db — Database tunnel, local PostgreSQL proxy, WireGuard VPN & SQL tools
+  console.log(`hebrah db — Database tunnel, local PostgreSQL proxy, WireGuard VPN & multi-engine database tools
 
 Usage:
   hebrah db proxy [env_id] [port]              Start local PostgreSQL wire-protocol proxy (default: 5432)
-  hebrah db wireguard [env_id] [--out <file>]  Export valid WireGuard VPN .conf (aliases: vpn, tunnel, wg)
-  hebrah db query [env_id] "<sql>"             Run read-only SQL query against attached database
+  hebrah db wireguard [env_id] [--out <file>]  Generate local Curve25519 keypair, register peer & export WireGuard .conf
+  hebrah db query [env_id] "<sql>"             Run read-only SQL query against attached database (--addon postgres|sqlite)
+  hebrah db execute [env_id] "<sql>"           Execute stateful SQL write/DDL against attached database (--addon postgres|sqlite)
   hebrah db tables [env_id]                    List tables and row counts in attached database
+  hebrah db vector <action> [env_id]           Qdrant vector DB tools (collections, create-collection, upsert, search, delete)
+  hebrah db graph <action> [env_id]            Neo4j graph DB tools (cypher, write, schema)
+  hebrah db sqlite <download|upload> [env_id]  Download or upload portable SQLite .sqlite database binary
   hebrah db status [env_id]                    Show database endpoints & VPN coordinates
 
 Options:
   --port, -p <port>        Local TCP port for "hebrah db proxy" (default: 5432, auto-falls back to 15432 if busy)
   --no-auth                Disable ephemeral per-session password authentication on 127.0.0.1 proxy
   --no-listen              Print GUI connection coordinates and exit without keeping TCP listener open
-  --out, -o <path>         Write WireGuard .conf to file (chmod 0600) instead of stdout
+  --out, -o <path>         Write WireGuard .conf or SQLite download to file instead of stdout
   --up                     Immediately activate WireGuard tunnel via wg-quick or WireGuard.app
   --reveal-private-key     Print unredacted WireGuard PrivateKey when writing to stdout
-  --addon <type>           Database module for "query" (default: postgres)
+  --addon <type>           Database module for "query" or "execute" (postgres | sqlite, default: postgres)
+  --collection <name>      Collection name for "hebrah db vector" (default: clinical_embeddings)
+  --top-k <n>              Top-K limit for "hebrah db vector search" (default: 5)
   --json                   Emit machine-readable JSON
 
 Examples:
   hebrah db proxy e858732a-828d-418b-ab48-4189d8a5cc04 5432
   hebrah db wireguard e858732a-828d-418b-ab48-4189d8a5cc04 --out ./hb-env.conf
   hebrah db query e858732a-828d-418b-ab48-4189d8a5cc04 "SELECT id, mrn, first_name, last_name FROM patients LIMIT 5"
-  hebrah db tables e858732a-828d-418b-ab48-4189d8a5cc04
+  hebrah db execute e858732a-828d-418b-ab48-4189d8a5cc04 "CREATE TABLE triage_queue (id TEXT PRIMARY KEY, priority INT)"
+  hebrah db vector search e858732a-828d-418b-ab48-4189d8a5cc04 "chest pain troponin" --collection clinical_embeddings
+  hebrah db graph cypher e858732a-828d-418b-ab48-4189d8a5cc04 "MATCH (p:Patient)-[:HAS_CONDITION]->(c:Condition) RETURN p.id, c.code LIMIT 5"
+  hebrah db sqlite download e858732a-828d-418b-ab48-4189d8a5cc04 --out ./clinic.sqlite
 `);
 }
 
@@ -118,10 +130,19 @@ export default async function dbCommand(
       listen: { type: 'boolean' },
       'no-listen': { type: 'boolean' },
       out: { type: 'string', short: 'o' },
+      file: { type: 'string', short: 'f' },
       up: { type: 'boolean', default: false },
       'reveal-private-key': { type: 'boolean', default: false },
       'client-name': { type: 'string', default: 'cli-developer-workstation' },
+      'list-peers': { type: 'boolean', default: false },
+      'revoke-peer': { type: 'string' },
       addon: { type: 'string', default: 'postgres' },
+      collection: { type: 'string', default: 'clinical_embeddings' },
+      dimension: { type: 'string', default: '8' },
+      'top-k': { type: 'string', default: '5' },
+      points: { type: 'string' },
+      ids: { type: 'string' },
+      params: { type: 'string' },
       json: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false }
     },
@@ -280,18 +301,62 @@ export default async function dbCommand(
       sub === 'wg'
     ) {
       const envId = await resolveEnvironmentId(positionals[1], options);
+      if (values['list-peers']) {
+        const peersRes = await api.get<{
+          environment_id: string;
+          server_endpoint: string;
+          server_public_key: string;
+          peers: Array<{ id: string; client_name: string; public_key: string; assigned_ip: string; status: string }>;
+        }>(`/v1/environments/${safeId(envId, 'environment_id')}/vpn/peers`);
+        if (values.json) {
+          json(peersRes);
+          return 0;
+        }
+        console.log(bold(`Active WireGuard Peers — ${envId}`));
+        console.log();
+        table(
+          ['PEER ID', 'CLIENT NAME', 'ASSIGNED IP', 'PUBLIC KEY', 'STATUS'],
+          (peersRes.peers ?? []).map((p) => [
+            p.id,
+            p.client_name,
+            p.assigned_ip,
+            p.public_key,
+            p.status
+          ])
+        );
+        return 0;
+      }
+
+      if (typeof values['revoke-peer'] === 'string' && values['revoke-peer'].trim()) {
+        const peerId = values['revoke-peer'].trim();
+        const revoked = await api.delete<{ ok: boolean; peer_id: string; status: string }>(
+          `/v1/environments/${safeId(envId, 'environment_id')}/vpn/peers/${safeId(peerId, 'peer_id')}`
+        );
+        if (values.json) {
+          json(revoked);
+          return 0;
+        }
+        success(`Revoked WireGuard peer ${bold(peerId)} for environment ${bold(envId)}.`);
+        return 0;
+      }
+
       const clientName = String(
         values['client-name'] || 'cli-developer-workstation'
       );
+      const clientKeypair = generateWireguardKeypair();
       const wg = await api.get<WireguardConfigResult>(
         `/v1/environments/${safeId(envId, 'environment_id')}/wireguard/config`,
         {
           client_name: clientName,
-          download: 'true'
+          download: 'true',
+          public_key: clientKeypair.publicKey
         }
       );
 
-      const configText = normalizeWireguardConfig(wg.config_text || wg.config || '');
+      const configText = normalizeWireguardConfig(
+        wg.config_text || wg.config || '',
+        clientKeypair.privateKey
+      );
       const filename = normalizeWireguardFilename(
         wg.filename || wg.config_filename,
         envId
@@ -447,6 +512,300 @@ export default async function dbCommand(
         )
       );
       return 0;
+    }
+
+    // ------------------------------------------------------------------
+    // 3b. hebrah db execute [env_id] "<sql>"
+    // ------------------------------------------------------------------
+    if (sub === 'execute' || sub === 'write' || sub === 'exec') {
+      let rawEnvId: string | undefined;
+      let sqlText: string | undefined;
+
+      if (positionals.length >= 3) {
+        rawEnvId = positionals[1];
+        sqlText = positionals.slice(2).join(' ');
+      } else if (positionals.length === 2) {
+        const arg1 = positionals[1]!;
+        if (/^\s*(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|WITH)\b/i.test(arg1)) {
+          sqlText = arg1;
+        } else {
+          error(
+            'hebrah db execute: SQL write/DDL statement required. Usage: hebrah db execute [env_id] "CREATE TABLE triage_queue (id TEXT PRIMARY KEY)"'
+          );
+          return 1;
+        }
+      } else {
+        error(
+          'hebrah db execute: SQL write/DDL statement required. Usage: hebrah db execute [env_id] "CREATE TABLE triage_queue (id TEXT PRIMARY KEY)"'
+        );
+        return 1;
+      }
+
+      const envId = await resolveEnvironmentId(rawEnvId, options);
+      const addon = typeof values.addon === 'string' ? values.addon : 'postgres';
+
+      const res = await api.post<{
+        ok: boolean;
+        environment_id: string;
+        addon: string;
+        statement_type: string;
+        rows_affected: number;
+        rows?: Record<string, unknown>[];
+        duration_ms: number;
+      }>(`/v1/environments/${safeId(envId, 'environment_id')}/db/execute`, {
+        sql: sqlText,
+        addon,
+        actor_type: 'developer'
+      });
+
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+
+      success(
+        `Executed ${bold(res.statement_type)} on ${cyan(res.addon)} (${res.rows_affected} rows affected in ${res.duration_ms}ms)`
+      );
+      if (res.rows && res.rows.length > 0) {
+        console.log();
+        const headers = Object.keys(res.rows[0]!);
+        const rows = res.rows.map((r) => headers.map((h) => String(r[h] ?? '')));
+        table(headers, rows);
+      }
+      return 0;
+    }
+
+    // ------------------------------------------------------------------
+    // 3c. hebrah db vector <action> [env_id] ...
+    // ------------------------------------------------------------------
+    if (sub === 'vector' || sub === 'qdrant') {
+      const action = positionals[1] || 'collections';
+      const collection = String(values.collection || 'clinical_embeddings');
+
+      if (action === 'collections' || action === 'list') {
+        const envId = await resolveEnvironmentId(positionals[2], options);
+        const res = await api.get<{
+          environment_id: string;
+          engine: string;
+          collections: Array<{ name: string; dimension: number; distance: string; points_count: number }>;
+        }>(`/v1/environments/${safeId(envId, 'environment_id')}/vector/collections`);
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        console.log(bold(`Qdrant Vector Collections — ${envId}`));
+        console.log();
+        table(
+          ['COLLECTION', 'DIMENSION', 'DISTANCE', 'POINTS'],
+          (res.collections ?? []).map((c) => [
+            c.name,
+            String(c.dimension),
+            c.distance,
+            String(c.points_count)
+          ])
+        );
+        return 0;
+      }
+
+      if (action === 'create-collection') {
+        const envId = await resolveEnvironmentId(positionals[2], options);
+        const dimension = Number.parseInt(String(values.dimension || '8'), 10);
+        const res = await api.post(
+          `/v1/environments/${safeId(envId, 'environment_id')}/vector/collections`,
+          { name: collection, dimension }
+        );
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        success(`Created vector collection ${bold(collection)} (dim=${dimension}) in ${cyan(envId)}.`);
+        return 0;
+      }
+
+      if (action === 'search' || action === 'query') {
+        const rawEnvOrQuery = positionals[2];
+        const maybeQuery = positionals[3];
+        const envId = await resolveEnvironmentId(maybeQuery ? rawEnvOrQuery : undefined, options);
+        const queryText = maybeQuery ?? rawEnvOrQuery ?? '';
+        const topK = Number.parseInt(String(values['top-k'] || '5'), 10);
+        const res = await api.post<{
+          environment_id: string;
+          collection: string;
+          matches: Array<{ id: string; score: number; text: string; metadata: Record<string, unknown> }>;
+          count: number;
+        }>(`/v1/environments/${safeId(envId, 'environment_id')}/vector/query`, {
+          query_text: queryText,
+          collection,
+          top_k: topK
+        });
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        console.log(bold(`Vector Search Results (${res.collection}) — ${res.count} matches`));
+        console.log();
+        table(
+          ['ID', 'SCORE', 'TEXT'],
+          (res.matches ?? []).map((m) => [
+            m.id,
+            String(m.score),
+            (m.text || '').slice(0, 90)
+          ])
+        );
+        return 0;
+      }
+
+      if (action === 'upsert') {
+        const envId = await resolveEnvironmentId(positionals[2], options);
+        const rawPoints = String(values.points || positionals[3] || '[]');
+        const points = JSON.parse(rawPoints) as Array<Record<string, unknown>>;
+        const res = await api.post(
+          `/v1/environments/${safeId(envId, 'environment_id')}/vector/upsert`,
+          { collection, points }
+        );
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        success(`Upserted ${points.length} vector point(s) into ${bold(collection)}.`);
+        return 0;
+      }
+
+      if (action === 'delete') {
+        const envId = await resolveEnvironmentId(positionals[2], options);
+        const rawIds = String(values.ids || positionals[3] || '');
+        const ids = rawIds.split(',').map((s) => s.trim()).filter(Boolean);
+        const res = await api.post(
+          `/v1/environments/${safeId(envId, 'environment_id')}/vector/delete`,
+          { collection, ids }
+        );
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        success(`Deleted ${ids.length} vector point(s) from ${bold(collection)}.`);
+        return 0;
+      }
+
+      error(`Unknown vector action "${action}". Supported: collections, create-collection, search, upsert, delete.`);
+      return 1;
+    }
+
+    // ------------------------------------------------------------------
+    // 3d. hebrah db graph <action> [env_id] ...
+    // ------------------------------------------------------------------
+    if (sub === 'graph' || sub === 'neo4j' || sub === 'cypher') {
+      const action = sub === 'cypher' ? 'cypher' : (positionals[1] || 'schema');
+      const offset = sub === 'cypher' ? 1 : 2;
+
+      if (action === 'schema') {
+        const envId = await resolveEnvironmentId(positionals[offset], options);
+        const res = await api.get<{
+          environment_id: string;
+          node_labels: Array<{ label: string; count: number }>;
+          relationship_types: Array<{ type: string; count: number }>;
+        }>(`/v1/environments/${safeId(envId, 'environment_id')}/graph/schema`);
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        console.log(bold(`Neo4j Clinical Graph Schema — ${envId}`));
+        console.log();
+        table(
+          ['NODE LABEL', 'COUNT'],
+          (res.node_labels ?? []).map((n) => [n.label, String(n.count)])
+        );
+        console.log();
+        table(
+          ['RELATIONSHIP TYPE', 'COUNT'],
+          (res.relationship_types ?? []).map((r) => [r.type, String(r.count)])
+        );
+        return 0;
+      }
+
+      const rawArg1 = positionals[offset];
+      const rawArg2 = positionals[offset + 1];
+      const envId = await resolveEnvironmentId(rawArg2 ? rawArg1 : undefined, options);
+      const cypherQuery = rawArg2 ?? rawArg1 ?? '';
+      if (!cypherQuery.trim()) {
+        error('Cypher query string required.');
+        return 1;
+      }
+      const params = values.params ? (JSON.parse(String(values.params)) as Record<string, unknown>) : undefined;
+      const endpoint = action === 'write' ? 'write' : 'cypher';
+      const res = await api.post<{
+        environment_id: string;
+        records?: Record<string, unknown>[];
+        records_returned?: number;
+        count?: number;
+      }>(`/v1/environments/${safeId(envId, 'environment_id')}/graph/${endpoint}`, {
+        query: cypherQuery,
+        params
+      });
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      const records = res.records ?? [];
+      if (records.length > 0) {
+        const headers = Object.keys(records[0]!);
+        const rows = records.map((r) => headers.map((h) => JSON.stringify(r[h] ?? '')));
+        table(headers, rows);
+      } else {
+        success(`Executed Cypher (${endpoint}) on ${cyan(envId)}.`);
+      }
+      return 0;
+    }
+
+    // ------------------------------------------------------------------
+    // 3e. hebrah db sqlite <download|upload> [env_id]
+    // ------------------------------------------------------------------
+    if (sub === 'sqlite') {
+      const action = positionals[1] || 'download';
+      const envId = await resolveEnvironmentId(positionals[2], options);
+      if (action === 'download') {
+        const res = await api.get<{
+          environment_id: string;
+          filename: string;
+          size_bytes: number;
+          sha256: string;
+          sqlite_base64: string;
+        }>(`/v1/environments/${safeId(envId, 'environment_id')}/db/sqlite/download`, {
+          format: 'json'
+        });
+        const outFile = resolvePath(
+          process.cwd(),
+          String(values.out || values.file || res.filename || `hebrah_${envId.slice(0, 8)}.sqlite`)
+        );
+        writeFileSync(outFile, Buffer.from(res.sqlite_base64, 'base64'));
+        if (values.json) {
+          json({ ...res, sqlite_base64: '<written>', saved_to: outFile });
+          return 0;
+        }
+        success(`Downloaded SQLite database (${formatBytes(res.size_bytes)}) to ${bold(outFile)}`);
+        return 0;
+      }
+      if (action === 'upload') {
+        const inFile = String(values.file || values.out || positionals[3] || '');
+        if (!inFile) {
+          error('SQLite file path required (--file <path>).');
+          return 1;
+        }
+        const resolved = resolvePath(process.cwd(), inFile);
+        const bytes = readFileSync(resolved);
+        const res = await api.post(
+          `/v1/environments/${safeId(envId, 'environment_id')}/db/sqlite/upload`,
+          { sqlite_base64: bytes.toString('base64') }
+        );
+        if (values.json) {
+          json(res);
+          return 0;
+        }
+        success(`Uploaded SQLite database (${formatBytes(bytes.length)}) to environment ${bold(envId)}.`);
+        return 0;
+      }
+      error(`Unknown sqlite action "${action}". Supported: download, upload.`);
+      return 1;
     }
 
     // ------------------------------------------------------------------

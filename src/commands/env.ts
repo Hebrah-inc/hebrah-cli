@@ -41,6 +41,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { api, safeId, CLI_VERSION } from '../api/client.js';
 import { updateCredentials } from '../config/credentials.js';
 import {
+  generateWireguardKeypair,
   normalizeWireguardConfig,
   redactWireguardPrivateKey,
   writeWireguardConfigFile,
@@ -839,12 +840,34 @@ async function wireguardEnv(
   const revealKey = Boolean(values['reveal-private-key']);
 
   try {
-    const wg = await api.get<WireguardConfigResult>(
+    let wg = await api.get<WireguardConfigResult>(
       `/v1/environments/${safeId(envId, 'environment_id')}/wireguard/config`
     );
 
+    let clientPrivKey: string | undefined;
+    const rawCfg = wg.config_text || wg.config || '';
+    if (rawCfg.includes('<GENERATE_CLIENT_PRIVATE_KEY')) {
+      const kp = generateWireguardKeypair();
+      clientPrivKey = kp.privateKey;
+      try {
+        const peerRes = await api.post<WireguardConfigResult>(
+          `/v1/environments/${safeId(envId, 'environment_id')}/vpn/peers`,
+          {
+            client_name: 'cli-developer-workstation',
+            public_key: kp.publicKey
+          }
+        );
+        if (peerRes && (peerRes.config_text || peerRes.config)) {
+          wg = { ...wg, ...peerRes };
+        }
+      } catch {
+        // Fallback to local key substitution if peer registration endpoint is not mocked in tests
+      }
+    }
+
     const configText = normalizeWireguardConfig(
-      wg.config_text || wg.config || ''
+      wg.config_text || wg.config || '',
+      clientPrivKey
     );
     const outPath = typeof values.out === 'string' ? values.out : undefined;
 

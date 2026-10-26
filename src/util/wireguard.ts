@@ -1,9 +1,36 @@
 import { writeFileSync, lstatSync, chmodSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve as resolvePath, basename, dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { api, safeId } from '../api/client.js';
 import { loadCredentials } from '../config/credentials.js';
 import { sanitizeTerminalText } from '../output/format.js';
+
+export interface WireguardKeypair {
+  privateKey: string;
+  publicKey: string;
+}
+
+/**
+ * Generate a real RFC 7748 Curve25519 (X25519) WireGuard keypair locally on the client workstation.
+ * The private key never leaves the local machine; only the public key is registered with the Hebrah control plane.
+ */
+export function generateWireguardKeypair(): WireguardKeypair {
+  const { publicKey, privateKey } = generateKeyPairSync('x25519', {
+    publicKeyEncoding: { type: 'spki', format: 'der' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'der' }
+  });
+  // X25519 SPKI DER is 44 bytes (last 32 bytes are raw public key)
+  // X25519 PKCS8 DER is 48 bytes (last 32 bytes are raw private key)
+  const rawPub = Buffer.from(publicKey.subarray(publicKey.length - 32));
+  const rawPriv = Buffer.from(privateKey.subarray(privateKey.length - 32));
+  rawPriv[0] &= 248;
+  rawPriv[31] &= 127;
+  rawPriv[31] |= 64;
+  return {
+    privateKey: rawPriv.toString('base64'),
+    publicKey: rawPub.toString('base64')
+  };
+}
 
 export interface EnvironmentSummary {
   id: string;
@@ -37,11 +64,15 @@ export function normalizeWireguardKey(rawKey: string, clampPrivate = false): str
   return padded;
 }
 
-export function normalizeWireguardConfig(configText: string): string {
+export function normalizeWireguardConfig(configText: string, clientPrivateKey?: string): string {
   if (!configText) return configText;
   return configText
     .replace(/^(\s*PrivateKey\s*=\s*)([^\r\n#]+)$/gim, (_m, prefix: string, key: string) => {
       if (key.includes('<redacted')) return `${prefix}${key}`;
+      if (key.includes('<GENERATE_CLIENT_PRIVATE_KEY')) {
+        const resolvedPriv = clientPrivateKey || generateWireguardKeypair().privateKey;
+        return `${prefix}${normalizeWireguardKey(resolvedPriv, true)}`;
+      }
       return `${prefix}${normalizeWireguardKey(key, true)}`;
     })
     .replace(/^(\s*PublicKey\s*=\s*)([^\r\n#]+)$/gim, (_m, prefix: string, key: string) => {
