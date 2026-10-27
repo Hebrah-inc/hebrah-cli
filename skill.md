@@ -1,6 +1,6 @@
 ---
 name: hebrah
-version: 0.4.7
+version: 0.4.8
 description: Isolated Health Environments & credential-blind clinical data connections for AI agents. Use Hebrah when the task requires connecting to a clinic environment (FHIR R4, HL7 v2 WebSocket, DICOMweb PACS, X12 EDI, Postgres, SQLite, Qdrant, Neo4j), consulting the isolated Environment AI Studio, or querying Open-Data Clinical & Imaging Enrichment Packs without receiving raw database credentials.
 ---
 
@@ -8,7 +8,7 @@ description: Isolated Health Environments & credential-blind clinical data conne
 
 ## 3-Step Agent Onboarding (90 seconds)
 
-### Step 1 — Install or Upgrade `@hebrah/cli` (v0.4.7+)
+### Step 1 — Install or Upgrade `@hebrah/cli` (v0.4.8+)
 
 ```bash
 npm install -g @hebrah/cli@latest
@@ -93,6 +93,8 @@ hebrah env logs <ENV_ID>
 ```bash
 hebrah login [--app-url <url>] [--api-url <url>] [--env-id <id>] [--key-stdin] [--headless]
 hebrah signup --name <org> --email <work-email> [--app-url <url>] [--api-url <url>] [--env-id <id>]
+hebrah mcp install [--client auto|claude|cursor|antigravity|windsurf|vscode] [--env-id <id>]  # Configure Hosted MCP at user scope
+hebrah mcp status [--offline]          # Inspect MCP configs & live connection (tokens always redacted)
 hebrah whoami                          # Show authenticated org, API endpoint, default environment, and wallet balance
 hebrah env list                        # List isolated health environments
 hebrah env create --name "Cardiology"  # Provision a new isolated clinic environment

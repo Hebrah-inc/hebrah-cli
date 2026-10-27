@@ -183,7 +183,7 @@ export default async function signup(
         info(`Share this claim link with your human team member to claim billing ownership and invite team members.`);
       }
       console.log();
-      info('Next: `hebrah env create --name "Clinic Sandbox" --addons postgres` or `hebrah discover`.');
+      info('Next: `hebrah mcp install` (configure Claude Code / Cursor MCP) or `hebrah env create --name "Clinic Sandbox" --addons postgres`.');
     }
 
     return 0;

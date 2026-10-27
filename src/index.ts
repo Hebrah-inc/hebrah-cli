@@ -32,6 +32,7 @@ const COMMANDS: Record<string, CommandDescriptor> = {
   relay: { description: 'Manage customer-side data relays (enroll/list/status/revoke)', handler: () => import('./commands/relay.js') },
   env: { description: 'Manage isolated clinic environments (create/architect/studio/open-data/query/logs/wireguard)', handler: () => import('./commands/env.js') },
   db: { description: 'Database tunnel, local PostgreSQL proxy, WireGuard VPN & SQL queries', handler: () => import('./commands/db.js') },
+  mcp: { description: 'Install, inspect, and verify Hosted MCP across Claude Code, Cursor & IDEs (install/status/remove)', handler: () => import('./commands/mcp.js') },
   skill: { description: 'Show the SKILL.md', handler: async () => (await import('./commands/skill.js')) as { default: (args: string[], options: Record<string, unknown>) => Promise<number> } },
   version: { description: 'Show version', handler: async () => { console.log(`hebrah ${PACKAGE_VERSION}`); } },
   help: { description: 'Show help', handler: async () => { showHelp(); } }
@@ -150,9 +151,10 @@ Commands:
     topup               Add credit via Stripe Checkout
     wallet              View balance, auto-reload, and burn rate
 
-  Environments:
+  Environments & MCP:
     env                 Manage isolated clinic environments (create/architect/studio/open-data/query/logs/wireguard)
     db                  Local PostgreSQL wire-protocol proxy, WireGuard tunnel & SQL tools
+    mcp                 Configure & verify Hosted MCP at user scope (install/status/command/remove)
 
   Relay:
     relay               Manage customer-side data relays

@@ -589,6 +589,7 @@ export default async function login(
     info(`Tier:         ${resolvedTier}`);
     info(`API Endpoint: ${resolvedApiUrl}`);
     info('Credentials saved to ~/.hebrah/credentials (mode 0600).');
+    info('Tip: Run `hebrah mcp install` to configure Hosted MCP at user scope for Claude Code, Cursor & IDEs.');
 
     if (connectedEnv) {
       console.log();
