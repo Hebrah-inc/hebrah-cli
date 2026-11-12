@@ -512,5 +512,143 @@ describe('hebrah env command', () => {
       });
     });
   });
+
+  describe('env specialty-packs, ecg, cohorts, cds-cascade, x12-benchmark, and fhir', () => {
+    it('admits patients with --specialty-pack, --conditions, --depth, and --branch-id', async () => {
+      const postSpy = vi.spyOn(api, 'post').mockResolvedValueOnce({
+        ok: true,
+        environment_id: 'env-ger-1',
+        admitted_count: 200
+      });
+
+      const argv = [
+        'admit',
+        'env-ger-1',
+        '--count',
+        '200',
+        '--specialty-pack',
+        'geriatric_polypharmacy',
+        '--conditions',
+        'ger_cascade_oxybutynin_delirium_antipsychotic,ger_ctrl_progressive_alzheimers_worsening',
+        '--depth',
+        'rich',
+        '--branch-id',
+        'br-1'
+      ];
+      const code = await env(argv, { _argv: argv });
+      expect(code).toBe(0);
+      expect(postSpy).toHaveBeenCalledWith('/v1/environments/env-ger-1/ehr/patients/generate', {
+        count: 200,
+        specialty_pack_id: 'geriatric_polypharmacy',
+        condition_ids: [
+          'ger_cascade_oxybutynin_delirium_antipsychotic',
+          'ger_ctrl_progressive_alzheimers_worsening'
+        ],
+        depth: 'rich',
+        branch_id: 'br-1'
+      });
+    });
+
+    it('lists specialty packs and inspects cardiology ECGs, cohort branches, prescribing cascade CDS hook, X12 benchmark, and FHIR bundles', async () => {
+      const getSpy = vi.spyOn(api, 'get');
+      const postSpy = vi.spyOn(api, 'post');
+
+      getSpy.mockResolvedValueOnce({
+        count: 12,
+        packs: [{ id: 'cardiology', name: 'Cardiology', condition_count: 10 }]
+      });
+      expect(
+        await env(['specialty-packs', 'env-cardio-1'], { _argv: ['specialty-packs', 'env-cardio-1'] })
+      ).toBe(0);
+      expect(getSpy).toHaveBeenLastCalledWith('/v1/environments/env-cardio-1/specialty-packs');
+
+      getSpy.mockResolvedValueOnce({
+        exemplars: [{ ecg_id: 4, diagnostic_superclass: 'MI', heart_rate_bpm: 84 }]
+      });
+      expect(
+        await env(['ecg', 'exemplars', 'env-cardio-1', '--superclass', 'MI'], {
+          _argv: ['ecg', 'exemplars', 'env-cardio-1', '--superclass', 'MI']
+        })
+      ).toBe(0);
+      expect(getSpy).toHaveBeenLastCalledWith('/v1/environments/env-cardio-1/ecg/exemplars', {
+        superclass: 'MI'
+      });
+
+      postSpy.mockResolvedValueOnce({
+        ok: true,
+        study: { id: 'ecg-st-1', ecg_id: 4, superclass: 'MI' }
+      });
+      expect(
+        await env(['ecg', 'attach', 'env-cardio-1', '--patient', 'pat-013', '--ecg', '4'], {
+          _argv: ['ecg', 'attach', 'env-cardio-1', '--patient', 'pat-013', '--ecg', '4']
+        })
+      ).toBe(0);
+      expect(postSpy).toHaveBeenLastCalledWith('/v1/environments/env-cardio-1/ecg/studies', {
+        patient_id: 'pat-013',
+        ecg_id: 4
+      });
+
+      postSpy.mockResolvedValueOnce({
+        ok: true,
+        branch: { id: 'br-stemi', name: 'STEMI Arm A' }
+      });
+      expect(
+        await env(['cohorts', 'create', 'env-cardio-1', '--name', 'STEMI Arm A', '--pack', 'cardiology'], {
+          _argv: ['cohorts', 'create', 'env-cardio-1', '--name', 'STEMI Arm A', '--pack', 'cardiology']
+        })
+      ).toBe(0);
+      expect(postSpy).toHaveBeenLastCalledWith('/v1/environments/env-cardio-1/cohorts/branches', {
+        name: 'STEMI Arm A',
+        specialty_pack_id: 'cardiology',
+        count: 10,
+        depth: 'standard'
+      });
+
+      postSpy.mockResolvedValueOnce({
+        cards: [{ indicator: 'critical', summary: 'Prescribing Cascade Detected' }],
+        environment_id: 'env-cardio-1',
+        patient_id: 'pat-013',
+        ground_truth: { is_prescribing_cascade: true, archetype_id: 'ger_cascade_oxybutynin_delirium_antipsychotic' }
+      });
+      expect(
+        await env(['cds-cascade', 'env-cardio-1', '--patient', 'pat-013', '--rxnorm', '312961'], {
+          _argv: ['cds-cascade', 'env-cardio-1', '--patient', 'pat-013', '--rxnorm', '312961']
+        })
+      ).toBe(0);
+      expect(postSpy).toHaveBeenLastCalledWith(
+        '/v1/environments/env-cardio-1/cds-hooks/prescribing-cascade',
+        {
+          hook: 'order-sign',
+          patient_id: 'pat-013',
+          proposed_rxnorm: '312961'
+        }
+      );
+
+      getSpy.mockResolvedValueOnce({
+        total_claims: 12,
+        environment_denial_rate_pct: 8.3,
+        cms_national_denial_rate_pct: 9.1
+      });
+      expect(
+        await env(['x12-benchmark', 'env-cardio-1'], { _argv: ['x12-benchmark', 'env-cardio-1'] })
+      ).toBe(0);
+      expect(getSpy).toHaveBeenLastCalledWith('/v1/environments/env-cardio-1/x12/benchmark');
+
+      getSpy.mockResolvedValueOnce({
+        resourceType: 'Bundle',
+        total: 6,
+        entry: [{ resource: { id: 'med-1', resourceType: 'MedicationRequest' } }]
+      });
+      expect(
+        await env(['fhir', 'env-cardio-1', 'MedicationRequest', '--patient', 'pat-013'], {
+          _argv: ['fhir', 'env-cardio-1', 'MedicationRequest', '--patient', 'pat-013']
+        })
+      ).toBe(0);
+      expect(getSpy).toHaveBeenLastCalledWith(
+        '/v1/environments/env-cardio-1/fhir/MedicationRequest',
+        { _count: '50', patient: 'pat-013' }
+      );
+    });
+  });
 });
 

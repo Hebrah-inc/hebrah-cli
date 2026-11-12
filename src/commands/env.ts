@@ -184,6 +184,23 @@ export default async function env(
       return patientsEnv(subArgv, { ...options, _argv: subArgv });
     case 'admit':
       return admitPatientsEnv(subArgv, { ...options, _argv: subArgv });
+    case 'specialty-packs':
+    case 'packs':
+      return specialtyPacksEnv(subArgv, { ...options, _argv: subArgv });
+    case 'ecg':
+    case 'cardiology':
+      return ecgEnv(subArgv, { ...options, _argv: subArgv });
+    case 'cohorts':
+    case 'branches':
+      return cohortsEnv(subArgv, { ...options, _argv: subArgv });
+    case 'cds-cascade':
+    case 'cascade':
+      return cdsCascadeEnv(subArgv, { ...options, _argv: subArgv });
+    case 'x12-benchmark':
+    case 'benchmark':
+      return x12BenchmarkEnv(subArgv, { ...options, _argv: subArgv });
+    case 'fhir':
+      return fhirEnv(subArgv, { ...options, _argv: subArgv });
     case 'logs':
     case 'log':
       return logsEnv(subArgv, { ...options, _argv: subArgv });
@@ -230,7 +247,13 @@ Subcommands:
   open-data (evidence) [id]    Inspect or search Open-Data Clinical & DICOM packs
   tables [id]                  List isolated database tables and row counts
   patients [id]                List synthetic patients with clinical filters
-  admit [id] --count <n>       Dynamically admit synthetic patients into cohort
+  admit [id] --count <n>       Dynamically admit synthetic patients (up to 500, specialty packs, depth=rich)
+  specialty-packs [id]         List or inspect the 12 clinical specialty condition packs
+  ecg [action] [id]            Manage PTB-XL 12-lead 100 Hz ECGs (exemplars, list, waveform, attach, compare)
+  cohorts [action] [id]        Manage research cohort branches (list, create, fork, compare)
+  cds-cascade [id]             Evaluate HL7 CDS Hooks 2.0 order-sign prescribing cascade detection
+  x12-benchmark [id]           Benchmark environment X12 837/835 claims against CMS Medicare utilization
+  fhir [id] <ResourceType>     Query environment-scoped FHIR R4 bundles (Patient, MedicationRequest, Observation, etc.)
   logs [id]                    View environment activity and audit logs
   pause [id]                   Pause environment (halts hourly resource charge)
   resume [id]                  Resume a paused environment
@@ -1265,6 +1288,11 @@ async function admitPatientsEnv(
       departments: { type: 'string' },
       diagnosis: { type: 'string' },
       acuity: { type: 'string' },
+      'specialty-pack': { type: 'string' },
+      pack: { type: 'string' },
+      conditions: { type: 'string' },
+      depth: { type: 'string' },
+      'branch-id': { type: 'string' },
       json: { type: 'boolean', default: false }
     },
     allowPositionals: true,
@@ -1275,7 +1303,7 @@ async function admitPatientsEnv(
   if (!envId) {
     error('hebrah env admit: environment_id required');
     error(
-      'Usage: hebrah env admit [environment_id] [--count 10] [--department <dept>] [--diagnosis <dx>] [--acuity <acuity>] [--json]'
+      'Usage: hebrah env admit [environment_id] [--count 10] [--specialty-pack <id>] [--conditions <ids>] [--depth standard|rich] [--branch-id <id>] [--department <dept>] [--diagnosis <dx>] [--acuity <acuity>] [--json]'
     );
     return 1;
   }
@@ -1301,6 +1329,24 @@ async function admitPatientsEnv(
   if (typeof values.acuity === 'string' && values.acuity.trim()) {
     body.acuity_levels = values.acuity.split(',').map((s) => s.trim()).filter(Boolean);
   }
+  const specialtyPack =
+    typeof values['specialty-pack'] === 'string'
+      ? values['specialty-pack'].trim()
+      : typeof values.pack === 'string'
+        ? values.pack.trim()
+        : '';
+  if (specialtyPack) {
+    body.specialty_pack_id = specialtyPack;
+  }
+  if (typeof values.conditions === 'string' && values.conditions.trim()) {
+    body.condition_ids = values.conditions.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (typeof values.depth === 'string' && values.depth.trim()) {
+    body.depth = values.depth.trim();
+  }
+  if (typeof values['branch-id'] === 'string' && values['branch-id'].trim()) {
+    body.branch_id = values['branch-id'].trim();
+  }
 
   try {
     const res = await api.post<Record<string, unknown>>(
@@ -1314,7 +1360,8 @@ async function admitPatientsEnv(
     }
 
     const admittedCount = Number(res.admitted_count ?? count);
-    success(`Admitted ${bold(String(admittedCount))} synthetic patients into environment ${bold(envId)}`);
+    const packSuffix = specialtyPack ? ` (pack: ${bold(specialtyPack)}${body.depth ? `, depth: ${body.depth}` : ''})` : '';
+    success(`Admitted ${bold(String(admittedCount))} synthetic patients into environment ${bold(envId)}${packSuffix}`);
     return 0;
   } catch (err) {
     error((err as Error).message);
@@ -1659,6 +1706,673 @@ async function architectEnv(
       console.log();
       success(`Auto-provisioned environment: ${bold(sanitizeTerminalText(String(provisioned.name ?? '')))} (${sanitizeTerminalText(String(provisioned.id))})`);
     }
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: specialty-packs
+// ---------------------------------------------------------------------------
+
+async function specialtyPacksEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      pack: { type: 'string' },
+      id: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const envId = resolveEnvId(positionals[0]);
+  if (!envId) {
+    error('hebrah env specialty-packs: environment_id required');
+    error('Usage: hebrah env specialty-packs [environment_id] [--pack <specialty_id>] [--json]');
+    return 1;
+  }
+
+  const packId =
+    typeof values.pack === 'string'
+      ? values.pack.trim()
+      : typeof values.id === 'string'
+        ? values.id.trim()
+        : positionals[1] ?? '';
+
+  try {
+    if (packId) {
+      const res = await api.get<Record<string, unknown>>(
+        `/v1/environments/${safeId(envId, 'environment_id')}/specialty-packs/${safeId(packId, 'specialty_id')}`
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      const conditions = Array.isArray(res.conditions)
+        ? (res.conditions as Array<Record<string, unknown>>)
+        : [];
+      console.log(bold(`Specialty Pack: ${sanitizeTerminalText(String(res.name ?? packId))} (${packId})`));
+      if (res.description) {
+        console.log(dim(sanitizeTerminalText(String(res.description))));
+      }
+      console.log();
+      const headers = ['CONDITION ID', 'LABEL', 'ICD-10', 'DEFAULT ACUITY'];
+      const rows = conditions.map((c) => [
+        String(c.id ?? ''),
+        String(c.name ?? c.label ?? '').slice(0, 44),
+        String(c.primary_icd10 ?? c.icd10 ?? ''),
+        String(c.default_acuity ?? 'routine')
+      ]);
+      table(headers, rows);
+      return 0;
+    }
+
+    const res = await api.get<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/specialty-packs`
+    );
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+    const packs = Array.isArray(res.packs) ? (res.packs as Array<Record<string, unknown>>) : [];
+    console.log(bold(`Specialty Condition Packs (${packs.length}) — Environment ${sanitizeTerminalText(envId)}`));
+    console.log();
+    const headers = ['PACK ID', 'NAME', 'CONDITIONS', 'SUMMARY'];
+    const rows = packs.map((p) => [
+      String(p.id ?? p.specialty_id ?? ''),
+      String(p.name ?? p.label ?? ''),
+      String(p.condition_count ?? (Array.isArray(p.conditions) ? p.conditions.length : 0)),
+      String(p.description ?? '').slice(0, 52)
+    ]);
+    table(headers, rows);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: ecg (Cardiology ptbxl_ecg_v1)
+// ---------------------------------------------------------------------------
+
+async function ecgEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      superclass: { type: 'string' },
+      patient: { type: 'string' },
+      'patient-id': { type: 'string' },
+      ecg: { type: 'string' },
+      'ecg-id': { type: 'string' },
+      study: { type: 'string' },
+      left: { type: 'string' },
+      right: { type: 'string' },
+      notes: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const action = positionals[0] && ['exemplars', 'list', 'show', 'waveform', 'attach', 'compare'].includes(positionals[0])
+    ? positionals[0]
+    : 'list';
+  const rawEnvArg = positionals[0] === action ? positionals[1] : positionals[0];
+  const envId = resolveEnvId(rawEnvArg);
+  if (!envId) {
+    error('hebrah env ecg: environment_id required');
+    error(
+      'Usage: hebrah env ecg [exemplars|list|show|waveform|attach|compare] [environment_id] [--superclass NORM|MI|STTC|CD|HYP] [--patient <id>] [--ecg <id>] [--left <id> --right <id>] [--json]'
+    );
+    return 1;
+  }
+
+  const safeEnv = safeId(envId, 'environment_id');
+
+  try {
+    if (action === 'exemplars') {
+      const q: Record<string, string> = {};
+      if (typeof values.superclass === 'string' && values.superclass.trim()) {
+        q.superclass = values.superclass.trim().toUpperCase();
+      }
+      const res = await api.get<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/ecg/exemplars`,
+        q
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      const exemplars = Array.isArray(res.exemplars)
+        ? (res.exemplars as Array<Record<string, unknown>>)
+        : [];
+      console.log(bold(`PTB-XL 12-Lead ECG Exemplars (${exemplars.length}) — Environment ${sanitizeTerminalText(envId)}`));
+      const headers = ['ECG ID', 'SUPERCLASS', 'AGE/SEX', 'HR (BPM)', 'AXIS', 'REPORT'];
+      const rows = exemplars.map((e) => [
+        String(e.ecg_id ?? ''),
+        String(e.diagnostic_superclass ?? e.superclass ?? ''),
+        `${e.age ?? '?'} / ${e.sex ?? '?'}`,
+        String(e.heart_rate_bpm ?? ''),
+        String(e.heart_axis ?? ''),
+        String(e.report_en ?? e.report ?? '').slice(0, 46)
+      ]);
+      table(headers, rows);
+      return 0;
+    }
+
+    if (action === 'attach') {
+      const patientId =
+        typeof values.patient === 'string'
+          ? values.patient.trim()
+          : typeof values['patient-id'] === 'string'
+            ? values['patient-id'].trim()
+            : '';
+      if (!patientId) {
+        error('hebrah env ecg attach: --patient <patient_id> is required');
+        return 1;
+      }
+      const ecgIdRaw =
+        typeof values.ecg === 'string'
+          ? values.ecg.trim()
+          : typeof values['ecg-id'] === 'string'
+            ? values['ecg-id'].trim()
+            : '';
+      const body: Record<string, unknown> = { patient_id: patientId };
+      if (ecgIdRaw) {
+        body.ecg_id = /^\d+$/.test(ecgIdRaw) ? parseInt(ecgIdRaw, 10) : ecgIdRaw;
+      }
+      if (typeof values.superclass === 'string' && values.superclass.trim()) {
+        body.superclass = values.superclass.trim().toUpperCase();
+      }
+      if (typeof values.notes === 'string' && values.notes.trim()) {
+        body.clinical_notes = values.notes.trim();
+      }
+      const res = await api.post<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/ecg/studies`,
+        body
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      const study = (res.study ?? {}) as Record<string, unknown>;
+      success(
+        `Attached PTB-XL ECG #${study.ecg_id ?? ''} (${study.superclass ?? 'ECG'}) as study ${bold(String(study.id ?? ''))} to patient ${bold(patientId)}`
+      );
+      return 0;
+    }
+
+    if (action === 'compare') {
+      const leftId = typeof values.left === 'string' ? values.left.trim() : '';
+      const rightId = typeof values.right === 'string' ? values.right.trim() : '';
+      if (!leftId || !rightId) {
+        error('hebrah env ecg compare: --left <id> and --right <id> are required');
+        return 1;
+      }
+      const res = await api.post<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/ecg/compare`,
+        {
+          left_ecg_id: /^\d+$/.test(leftId) ? parseInt(leftId, 10) : leftId,
+          right_ecg_id: /^\d+$/.test(rightId) ? parseInt(rightId, 10) : rightId
+        }
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      console.log(bold(`12-Lead ECG Comparison: ${leftId} vs. ${rightId}`));
+      kv([
+        ['Left Superclass', String((res.left as Record<string, unknown>)?.diagnostic_superclass ?? '')],
+        ['Right Superclass', String((res.right as Record<string, unknown>)?.diagnostic_superclass ?? '')],
+        ['Summary', String(res.clinical_summary ?? res.summary ?? '12-lead delta computed')]
+      ]);
+      return 0;
+    }
+
+    if (action === 'show' || action === 'waveform') {
+      const studyId =
+        typeof values.study === 'string'
+          ? values.study.trim()
+          : typeof values.ecg === 'string'
+            ? values.ecg.trim()
+            : positionals[2] ?? positionals[1] ?? '';
+      if (!studyId) {
+        error(`hebrah env ecg ${action}: --study <study_or_ecg_id> is required`);
+        return 1;
+      }
+      const suffix = action === 'waveform' ? '/waveform' : '';
+      const res = await api.get<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/ecg/studies/${safeId(studyId, 'study_id')}${suffix}`
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      kv([
+        ['Study / ECG ID', String(res.id ?? res.ecg_id ?? studyId)],
+        ['Patient ID', String(res.patient_id ?? 'exemplar')],
+        ['Superclass', String(res.superclass ?? res.diagnostic_superclass ?? '')],
+        ['Sampling Rate', `${res.sampling_rate_hz ?? 100} Hz`],
+        ['Leads', Array.isArray(res.lead_names) ? res.lead_names.join(', ') : 'I, II, III, aVR, aVL, aVF, V1-V6']
+      ]);
+      return 0;
+    }
+
+    // Default: list studies in environment
+    const q: Record<string, string> = {};
+    const patFilter =
+      typeof values.patient === 'string'
+        ? values.patient.trim()
+        : typeof values['patient-id'] === 'string'
+          ? values['patient-id'].trim()
+          : '';
+    if (patFilter) q.patient_id = patFilter;
+    if (typeof values.superclass === 'string' && values.superclass.trim()) {
+      q.superclass = values.superclass.trim().toUpperCase();
+    }
+    const res = await api.get<Record<string, unknown>>(
+      `/v1/environments/${safeEnv}/ecg/studies`,
+      q
+    );
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+    const studies = Array.isArray(res.studies) ? (res.studies as Array<Record<string, unknown>>) : [];
+    console.log(bold(`Environment 12-Lead ECG Studies (${studies.length}) — ${sanitizeTerminalText(envId)}`));
+    const headers = ['STUDY ID', 'PATIENT', 'PTB-XL ID', 'SUPERCLASS', 'HR (BPM)', 'INTERPRETATION'];
+    const rows = studies.map((s) => [
+      String(s.id ?? ''),
+      String(s.patient_id ?? ''),
+      String(s.ecg_id ?? ''),
+      String(s.superclass ?? ''),
+      String(s.heart_rate_bpm ?? ''),
+      String(s.interpretation ?? s.report_en ?? '').slice(0, 44)
+    ]);
+    table(headers, rows);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: cohorts (Research Cohort Branches)
+// ---------------------------------------------------------------------------
+
+async function cohortsEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      name: { type: 'string' },
+      pack: { type: 'string' },
+      'specialty-pack': { type: 'string' },
+      conditions: { type: 'string' },
+      count: { type: 'string' },
+      depth: { type: 'string' },
+      branch: { type: 'string' },
+      left: { type: 'string' },
+      right: { type: 'string' },
+      notes: { type: 'string' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const action = positionals[0] && ['list', 'create', 'fork', 'compare'].includes(positionals[0])
+    ? positionals[0]
+    : 'list';
+  const rawEnvArg = positionals[0] === action ? positionals[1] : positionals[0];
+  const envId = resolveEnvId(rawEnvArg);
+  if (!envId) {
+    error('hebrah env cohorts: environment_id required');
+    error(
+      'Usage: hebrah env cohorts [list|create|fork|compare] [environment_id] [--name <name>] [--pack <id>] [--count <n>] [--depth standard|rich] [--left <id> --right <id>] [--json]'
+    );
+    return 1;
+  }
+  const safeEnv = safeId(envId, 'environment_id');
+
+  try {
+    if (action === 'create') {
+      const name = typeof values.name === 'string' ? values.name.trim() : '';
+      if (!name) {
+        error('hebrah env cohorts create: --name <branch_name> is required');
+        return 1;
+      }
+      const pack =
+        typeof values['specialty-pack'] === 'string'
+          ? values['specialty-pack'].trim()
+          : typeof values.pack === 'string'
+            ? values.pack.trim()
+            : 'cardiology';
+      const body: Record<string, unknown> = {
+        name,
+        specialty_pack_id: pack,
+        count: values.count ? parseInt(String(values.count), 10) : 10,
+        depth: typeof values.depth === 'string' ? values.depth.trim() : 'standard'
+      };
+      if (typeof values.conditions === 'string' && values.conditions.trim()) {
+        body.condition_ids = values.conditions.split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      if (typeof values.notes === 'string' && values.notes.trim()) {
+        body.notes = values.notes.trim();
+      }
+      const res = await api.post<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/cohorts/branches`,
+        body
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      const br = (res.branch ?? {}) as Record<string, unknown>;
+      success(`Created cohort branch ${bold(String(br.name ?? name))} (${br.id ?? ''})`);
+      return 0;
+    }
+
+    if (action === 'fork') {
+      const branchId =
+        typeof values.branch === 'string' ? values.branch.trim() : positionals[2] ?? '';
+      if (!branchId) {
+        error('hebrah env cohorts fork: --branch <branch_id> is required');
+        return 1;
+      }
+      const body: Record<string, unknown> = {};
+      if (typeof values.name === 'string' && values.name.trim()) body.name = values.name.trim();
+      if (values.count) body.count = parseInt(String(values.count), 10);
+      if (typeof values.depth === 'string' && values.depth.trim()) body.depth = values.depth.trim();
+      if (typeof values.conditions === 'string' && values.conditions.trim()) {
+        body.condition_ids = values.conditions.split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      const res = await api.post<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/cohorts/branches/${safeId(branchId, 'branch_id')}/fork`,
+        body
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      const br = (res.branch ?? {}) as Record<string, unknown>;
+      success(`Forked branch ${bold(branchId)} -> ${bold(String(br.name ?? ''))} (${br.id ?? ''})`);
+      return 0;
+    }
+
+    if (action === 'compare') {
+      const left = typeof values.left === 'string' ? values.left.trim() : '';
+      const right = typeof values.right === 'string' ? values.right.trim() : '';
+      if (!left || !right) {
+        error('hebrah env cohorts compare: --left <branch_id> and --right <branch_id> are required');
+        return 1;
+      }
+      const res = await api.get<Record<string, unknown>>(
+        `/v1/environments/${safeEnv}/cohorts/branches/compare`,
+        { left, right }
+      );
+      if (values.json) {
+        json(res);
+        return 0;
+      }
+      console.log(bold(`Cohort Branch Comparison: ${left} vs. ${right}`));
+      json(res);
+      return 0;
+    }
+
+    const res = await api.get<Record<string, unknown>>(
+      `/v1/environments/${safeEnv}/cohorts/branches`
+    );
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+    const branches = Array.isArray(res.branches)
+      ? (res.branches as Array<Record<string, unknown>>)
+      : [];
+    console.log(bold(`Cohort Branches (${branches.length}) — Environment ${sanitizeTerminalText(envId)}`));
+    const headers = ['BRANCH ID', 'NAME', 'SPECIALTY PACK', 'DEPTH', 'PATIENTS'];
+    const rows = branches.map((b) => [
+      String(b.id ?? ''),
+      String(b.name ?? ''),
+      String(b.specialty_pack_id ?? ''),
+      String(b.depth ?? 'standard'),
+      String(b.patient_count ?? '')
+    ]);
+    table(headers, rows);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: cds-cascade (Point-of-Prescribing Cascade CDS Hook)
+// ---------------------------------------------------------------------------
+
+async function cdsCascadeEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      patient: { type: 'string' },
+      'patient-id': { type: 'string' },
+      rxnorm: { type: 'string' },
+      medication: { type: 'string' },
+      hook: { type: 'string', default: 'order-sign' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const envId = resolveEnvId(positionals[0]);
+  if (!envId) {
+    error('hebrah env cds-cascade: environment_id required');
+    error(
+      'Usage: hebrah env cds-cascade [environment_id] --patient <patient_id> [--rxnorm <code>] [--medication <display>] [--hook order-sign|order-select] [--json]'
+    );
+    return 1;
+  }
+  const patientId =
+    typeof values.patient === 'string'
+      ? values.patient.trim()
+      : typeof values['patient-id'] === 'string'
+        ? values['patient-id'].trim()
+        : 'pat-001';
+
+  const body: Record<string, unknown> = {
+    hook: typeof values.hook === 'string' ? values.hook.trim() : 'order-sign',
+    patient_id: patientId
+  };
+  if (typeof values.rxnorm === 'string' && values.rxnorm.trim()) {
+    body.proposed_rxnorm = values.rxnorm.trim();
+  }
+  if (typeof values.medication === 'string' && values.medication.trim()) {
+    body.proposed_display = values.medication.trim();
+  }
+
+  try {
+    const res = await api.post<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/cds-hooks/prescribing-cascade`,
+      body
+    );
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+    const gt = (res.ground_truth ?? {}) as Record<string, unknown>;
+    const cards = Array.isArray(res.cards) ? (res.cards as Array<Record<string, unknown>>) : [];
+    const card0 = cards[0] ?? {};
+    console.log(bold(`HL7 CDS Hooks 2.0 (${body.hook}) — Prescribing Cascade Evaluation`));
+    console.log(dim('──────────────────────────────────────────────────────────────────'));
+    kv([
+      ['Environment ID', String(res.environment_id ?? envId)],
+      ['Patient ID', String(res.patient_id ?? patientId)],
+      ['Archetype ID', String(gt.archetype_id ?? 'n/a')],
+      ['Cascade Class', gt.is_prescribing_cascade ? red('POSITIVE_CASCADE') : green('NEGATIVE_CONTROL')],
+      ['CDS Card Indicator', String(card0.indicator ?? 'info')],
+      ['CDS Card Summary', sanitizeTerminalText(String(card0.summary ?? ''))],
+      ['eGFR (Creatinine vs Cystatin C)', `${gt.latest_egfr_creatinine ?? 'n/a'} vs ${gt.latest_egfr_cystatin_c ?? 'n/a'} mL/min/1.73m2`],
+      ['Recommended Action', sanitizeTerminalText(String(gt.recommended_action ?? ''))]
+    ]);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: x12-benchmark (CMS Medicare Utilization Benchmark)
+// ---------------------------------------------------------------------------
+
+async function x12BenchmarkEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const envId = resolveEnvId(positionals[0]);
+  if (!envId) {
+    error('hebrah env x12-benchmark: environment_id required');
+    error('Usage: hebrah env x12-benchmark [environment_id] [--json]');
+    return 1;
+  }
+
+  try {
+    const res = await api.get<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/x12/benchmark`
+    );
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+    console.log(bold(`CMS Medicare Utilization Benchmark (medicare_utilization_v1) — ${sanitizeTerminalText(envId)}`));
+    kv([
+      ['Total Claims Evaluated', String(res.total_claims ?? 0)],
+      ['Denial Rate', `${res.environment_denial_rate_pct ?? 0}% (CMS National Ref: ${res.cms_national_denial_rate_pct ?? 0}%)`],
+      ['Average Allowed Charge', String(res.average_allowed_usd ?? 'n/a')]
+    ]);
+    return 0;
+  } catch (err) {
+    error((err as Error).message);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: fhir (Environment-scoped FHIR R4 Search)
+// ---------------------------------------------------------------------------
+
+async function fhirEnv(
+  args: string[],
+  options: Record<string, unknown>
+): Promise<number> {
+  const argv = getArgv(options, args);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      patient: { type: 'string' },
+      'patient-id': { type: 'string' },
+      count: { type: 'string', default: '50' },
+      json: { type: 'boolean', default: false }
+    },
+    allowPositionals: true,
+    strict: false
+  });
+
+  const knownTypes = new Set([
+    'Patient',
+    'Encounter',
+    'Observation',
+    'MedicationRequest',
+    'Condition',
+    'Claim',
+    'AllergyIntolerance',
+    'Procedure',
+    'ImagingStudy',
+    'DocumentReference',
+    'DiagnosticReport',
+    'Immunization',
+    'CarePlan'
+  ]);
+  const firstIsType = positionals[0] && knownTypes.has(positionals[0]);
+  const resourceType = firstIsType ? positionals[0] : (positionals[1] ?? 'Patient');
+  const rawEnvArg = firstIsType ? positionals[1] : positionals[0];
+  const envId = resolveEnvId(rawEnvArg);
+
+  if (!envId) {
+    error('hebrah env fhir: environment_id required');
+    error('Usage: hebrah env fhir [environment_id] <ResourceType> [--patient <id>] [--count 50] [--json]');
+    return 1;
+  }
+
+  const queryParams: Record<string, string> = {
+    _count: typeof values.count === 'string' ? values.count : '50'
+  };
+  const patFilter =
+    typeof values.patient === 'string'
+      ? values.patient.trim()
+      : typeof values['patient-id'] === 'string'
+        ? values['patient-id'].trim()
+        : '';
+  if (patFilter) queryParams.patient = patFilter;
+
+  try {
+    const res = await api.get<Record<string, unknown>>(
+      `/v1/environments/${safeId(envId, 'environment_id')}/fhir/${safeId(resourceType, 'resource_type')}`,
+      queryParams
+    );
+    if (values.json) {
+      json(res);
+      return 0;
+    }
+    const entries = Array.isArray(res.entry) ? (res.entry as Array<Record<string, unknown>>) : [];
+    console.log(
+      bold(`FHIR R4 ${resourceType} Bundle (${res.total ?? entries.length} resources) — ${sanitizeTerminalText(envId)}`)
+    );
+    const headers = ['ID', 'RESOURCE TYPE', 'SUMMARY'];
+    const rows = entries.slice(0, 25).map((e) => {
+      const r = (e.resource ?? {}) as Record<string, unknown>;
+      const summary =
+        (r.medicationCodeableConcept as Record<string, unknown>)?.text ??
+        (r.code as Record<string, unknown>)?.text ??
+        ((Array.isArray(r.reasonCode) && (r.reasonCode[0] as Record<string, unknown>)?.text) || '') ??
+        r.status ??
+        '';
+      return [String(r.id ?? ''), String(r.resourceType ?? resourceType), String(summary).slice(0, 56)];
+    });
+    table(headers, rows);
     return 0;
   } catch (err) {
     error((err as Error).message);
