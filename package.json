@@ -22,7 +22,9 @@
     "fhir",
     "hl7",
     "dicom",
-    "sftp",
+    "x12",
+    "qdrant",
+    "neo4j",
     "sqlite",
     "http-rest"
   ],

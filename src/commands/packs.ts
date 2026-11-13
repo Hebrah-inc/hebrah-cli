@@ -47,7 +47,7 @@ export default async function packs(
 
     console.log();
     console.log(dim(`Total: ${packs.length} pack${packs.length === 1 ? '' : 's'}`));
-    console.log(dim('Discover targets: hebrah discover --pack <pack_id>'));
+    console.log(dim('Discover targets: hebrah discover --pack healthcare'));
 
     return 0;
   } catch (err) {

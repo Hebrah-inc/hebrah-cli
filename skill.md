@@ -88,7 +88,7 @@ hebrah env trigger <ENV_ID> --scenario vital_alert
 hebrah env logs <ENV_ID>
 ```
 
-## CLI Command Summary (`@hebrah/cli` v0.4.7)
+## CLI Command Summary (`@hebrah/cli` v0.4.9)
 
 ```bash
 hebrah login [--app-url <url>] [--api-url <url>] [--env-id <id>] [--key-stdin] [--headless]
@@ -110,7 +110,8 @@ hebrah env query [env_id] --sql "..."  # Run credential-blind SQL query (SELECT 
 hebrah env trigger [env_id] --scenario <name>
 hebrah env logs [env_id]               # View environment activity & audit logs
 hebrah env wireguard [env_id]          # Export WireGuard VPN config (0600 permissions) for human DB GUIs
-hebrah discover                        # List catalog data targets
+hebrah packs                           # List active connector packs (healthcare, database)
+hebrah discover [--pack healthcare]    # List Healthcare & Database catalog targets
 hebrah connect <target> --scopes <...> # Open scoped connection handle
 hebrah query <conn_id> --sql "..."     # Execute scoped query
 hebrah audit <conn_id> --verify        # Verify SHA-256 hash-chained audit trail

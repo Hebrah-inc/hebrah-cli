@@ -1,11 +1,11 @@
 // `hebrah discover` — list available targets.
 //
 // Usage:
-//   hebrah discover                       (all targets)
-//   hebrah discover --pack audit          (filter by pack)
-//   hebrah discover --pack audit fintech  (multiple packs)
-//   hebrah discover --healthy             (only healthy targets)
-//   hebrah discover --json                (machine-readable)
+//   hebrah discover                           (all Healthcare & Database targets)
+//   hebrah discover --pack healthcare         (filter by pack)
+//   hebrah discover --pack healthcare database (multiple packs)
+//   hebrah discover --healthy                 (only healthy targets)
+//   hebrah discover --json                    (machine-readable)
 
 import { parseArgs } from 'node:util';
 import { api } from '../api/client.js';
